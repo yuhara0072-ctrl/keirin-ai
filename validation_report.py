@@ -8,20 +8,22 @@ from typing import Optional
 
 import pandas as pd
 
-from analyze import analyze_by_venue
-from bet_tracker import (
-    _score_band,
-    _summarize,
-    add_bet_record,
-    load_bet_records,
-    settle_pending_bets,
-)
 from config import DATA_DIR
 from db import db_session, get_connection
-from learning import load_learned_patterns
 
 VALIDATION_DIR = DATA_DIR / "validation"
 VALIDATION_DIR.mkdir(parents=True, exist_ok=True)
+
+__all__ = [
+    "build_validation_lines",
+    "build_validation_report",
+    "empty_validation_report",
+    "get_validation_bundle",
+    "migrate_validation_table",
+    "run_daily_validation",
+    "safe_validation_period",
+    "save_validation_report",
+]
 
 AMOUNT_BUCKETS = [
     (300, "300円以上"),
@@ -93,6 +95,8 @@ def group_stats(df: pd.DataFrame, col: str, label_col: str) -> pd.DataFrame:
     if settled.empty:
         return pd.DataFrame()
     if col == "ai_score":
+        from bet_tracker import _score_band
+
         settled[label_col] = settled["ai_score"].fillna(0).astype(float).map(_score_band)
     elif col == "bet_amount":
         settled[label_col] = settled["bet_amount"].fillna(0).astype(int).map(_amount_bucket)
@@ -116,6 +120,8 @@ def group_stats(df: pd.DataFrame, col: str, label_col: str) -> pd.DataFrame:
 
 
 def period_report(df: pd.DataFrame, label: str) -> dict:
+    from bet_tracker import _summarize
+
     summary = _summarize(df)
     settled = df[df["status"] == "settled"] if not df.empty else pd.DataFrame()
     return {
@@ -190,6 +196,8 @@ def sync_battle_virtual_bets(
     bet_type: str = "3連単",
 ) -> int:
     """買わなかった候補の仮想購入を同期（実戦判定・資金管理連動）"""
+    from bet_tracker import add_bet_record, load_bet_records
+
     actual = load_bet_records(bet_type, is_virtual=0)
     bought = set(
         zip(actual["race_id"].astype(str), actual["combination"].astype(str))
@@ -240,6 +248,9 @@ def sync_battle_virtual_bets(
 
 def _market_condition_stats(bet_type: str = "3連単") -> tuple[pd.DataFrame, pd.DataFrame]:
     """DB全体の条件別回収（AI強弱）"""
+    from analyze import analyze_by_venue
+    from learning import load_learned_patterns
+
     strong_rows: list[dict] = []
     weak_rows: list[dict] = []
 
@@ -366,6 +377,8 @@ def build_validation_report(
 
     if sync_virtual:
         sync_battle_virtual_bets(battle_bundle, bankroll_plan, bet_type)
+
+    from bet_tracker import load_bet_records, settle_pending_bets
 
     settle_pending_bets(bet_type)
     actual = load_bet_records(bet_type, is_virtual=0)

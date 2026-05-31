@@ -45,14 +45,110 @@ from bankroll import (
     save_bankroll_snapshot,
     set_bankroll_config,
 )
-from validation_report import (
-    build_validation_lines,
-    empty_validation_report,
-    get_validation_bundle,
-    run_daily_validation,
-    safe_validation_period,
-    save_validation_report,
-)
+
+NO_DATA_MESSAGE = "まだデータがありません。workflow実行してください"
+
+
+def _validation_import_stubs() -> dict:
+    """validation_report 読み込み失敗時の最小スタブ"""
+
+    def empty_validation_report(bet_type: str = "3連単") -> dict:
+        empty_summary = {
+            "count": 0,
+            "total_bet": 0,
+            "total_payout": 0,
+            "total_profit": 0,
+            "recovery_rate": 0.0,
+            "hit_rate": 0.0,
+            "settled": 0,
+            "pending": 0,
+        }
+
+        def _period(label: str) -> dict:
+            return {
+                "label": label,
+                "summary": empty_summary.copy(),
+                "by_ai_score": pd.DataFrame(),
+                "by_verdict": pd.DataFrame(),
+                "by_rank": pd.DataFrame(),
+                "by_amount": pd.DataFrame(),
+                "settled_count": 0,
+            }
+
+        return {
+            "bet_type": bet_type,
+            "ref_date": date.today().strftime("%Y%m%d"),
+            "has_data": False,
+            "today": _period("今日"),
+            "today_virtual": _period("今日(仮想)"),
+            "week": _period("今週"),
+            "month": _period("今月"),
+            "strong_conditions": pd.DataFrame(),
+            "weak_conditions": pd.DataFrame(),
+            "improvements": [],
+            "lines": [],
+            "history": pd.DataFrame(),
+            "summary_all_actual": empty_summary.copy(),
+            "summary_all_virtual": empty_summary.copy(),
+            "streaks": {},
+            "quality_valid_pct": 0.0,
+        }
+
+    def safe_validation_period(report: dict, key: str) -> dict:
+        period = (report or {}).get(key)
+        if isinstance(period, dict) and isinstance(period.get("summary"), dict):
+            return period
+        return empty_validation_report().get(key) or empty_validation_report()["month"]
+
+    def get_validation_bundle(
+        bet_type: str = "3連単",
+        *,
+        battle_bundle=None,
+        bankroll_plan=None,
+        sync_virtual: bool = True,
+    ) -> dict:
+        return empty_validation_report(bet_type)
+
+    def build_validation_lines(report=None, bet_type: str = "3連単") -> list[str]:
+        return [NO_DATA_MESSAGE]
+
+    def run_daily_validation(bet_type: str = "3連単") -> dict:
+        return {"ok": False, "improvements": [], "report_path": ""}
+
+    def save_validation_report(bet_type: str = "3連単", **kwargs) -> Path:
+        out = DATA_DIR / "validation" / "validation_latest.txt"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        if not out.exists():
+            out.write_text(NO_DATA_MESSAGE, encoding="utf-8")
+        return out
+
+    return {
+        "build_validation_lines": build_validation_lines,
+        "empty_validation_report": empty_validation_report,
+        "get_validation_bundle": get_validation_bundle,
+        "run_daily_validation": run_daily_validation,
+        "safe_validation_period": safe_validation_period,
+        "save_validation_report": save_validation_report,
+    }
+
+
+try:
+    from validation_report import (
+        build_validation_lines,
+        empty_validation_report,
+        get_validation_bundle,
+        run_daily_validation,
+        safe_validation_period,
+        save_validation_report,
+    )
+except ImportError:
+    _validation_stubs = _validation_import_stubs()
+    build_validation_lines = _validation_stubs["build_validation_lines"]
+    empty_validation_report = _validation_stubs["empty_validation_report"]
+    get_validation_bundle = _validation_stubs["get_validation_bundle"]
+    run_daily_validation = _validation_stubs["run_daily_validation"]
+    safe_validation_period = _validation_stubs["safe_validation_period"]
+    save_validation_report = _validation_stubs["save_validation_report"]
 from improvement_ai import (
     build_improvement_lines,
     get_improvement_bundle,
@@ -113,9 +209,6 @@ REPORT_LATEST = DATA_DIR / "report_latest.txt"
 
 def lines_to_text(lines: list[str]) -> str:
     return "\n".join(lines)
-
-
-NO_DATA_MESSAGE = "まだデータがありません。workflow実行してください"
 
 
 def db_status() -> dict:
