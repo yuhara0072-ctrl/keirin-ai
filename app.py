@@ -87,7 +87,7 @@ from ui_mobile import (
 )
 from config import DAILY_FETCH_LIMIT, DATA_DIR, DEFAULT_BANKROLL, TARGET_RACES
 from data_progress import get_data_progress_bundle
-from db import get_connection, init_db
+from db import ensure_db, get_db_status, init_db
 from detect_anomaly import detect_all
 from fetch_daily import fetch_daily
 from pre_race import (
@@ -113,13 +113,177 @@ def lines_to_text(lines: list[str]) -> str:
     return "\n".join(lines)
 
 
+NO_DATA_MESSAGE = "まだデータがありません。workflow実行してください"
+
+
 def db_status() -> dict:
-    conn = get_connection()
-    races = conn.execute("SELECT COUNT(*) FROM races").fetchone()[0]
-    results = conn.execute("SELECT COUNT(*) FROM results").fetchone()[0]
-    odds = conn.execute("SELECT COUNT(*) FROM odds").fetchone()[0]
-    conn.close()
-    return {"races": races, "results": results, "odds": odds}
+    """後方互換 — get_db_status() へ委譲"""
+    return get_db_status()
+
+
+def empty_recommend_bundle() -> dict:
+    return {
+        "has_data": False,
+        "targets": [],
+        "dangerous_popular": [],
+        "skip_races": [],
+        "global_picks": [],
+        "all_cards": [],
+        "lines": [],
+    }
+
+
+def empty_score_bundle() -> dict:
+    return {"scores": pd.DataFrame(), "has_data": False}
+
+
+def empty_battle_bundle() -> dict:
+    return {
+        "has_data": False,
+        "buy_candidates": [],
+        "small_candidates": [],
+        "skip_candidates": [],
+        "dangerous_popular": [],
+    }
+
+
+def empty_validation_bundle() -> dict:
+    return {
+        "today": {"summary": {"settled": 0}},
+        "week": {"summary": {"settled": 0, "recovery_rate": None}},
+        "has_data": False,
+    }
+
+
+def load_app_bundles(bet_type: str) -> dict:
+    """データ0件・Cloud初回でも落ちないバンドル読み込み"""
+    score_bundle = get_ai_score_bundle(bet_type)
+    recommend_bundle = get_ai_recommend_bundle(
+        bet_type, scores=score_bundle["scores"]
+    )
+    pre_race_bundle = get_pre_race_bundle(bet_type)
+    market_bundle = get_market_monitor_bundle(bet_type)
+    learning_bundle = get_learning_bundle(bet_type, refresh=True)
+    ml_bundle = get_ml_bundle(bet_type, scores=score_bundle["scores"], retrain=False)
+    quality_bundle = get_quality_bundle(bet_type)
+    advanced_bundle = get_advanced_learning_bundle(bet_type, retrain=False)
+    line_bundle = get_line_analysis_bundle()
+    battle_bundle = get_battle_judge_bundle(
+        bet_type,
+        scores=score_bundle["scores"],
+        market=market_bundle,
+        line=line_bundle,
+        pre_race=pre_race_bundle,
+        ml=ml_bundle,
+        quality=quality_bundle,
+        advanced=advanced_bundle,
+    )
+    bankroll_bundle = get_bankroll_bundle(bet_type, battle_bundle=battle_bundle)
+    validation_bundle = get_validation_bundle(
+        bet_type,
+        battle_bundle=battle_bundle,
+        bankroll_plan=bankroll_bundle,
+        sync_virtual=True,
+    )
+    backup_bundle = get_backup_bundle()
+    return {
+        "analyze_text": lines_to_text(build_analyze_lines(bet_type)),
+        "ai_bundle": get_ai_insights_bundle(bet_type),
+        "score_bundle": score_bundle,
+        "recommend_bundle": recommend_bundle,
+        "ops_status": get_ops_status(
+            bet_type,
+            fast=True,
+            targets_count=len(recommend_bundle.get("targets") or []),
+        ),
+        "charts_bundle": get_charts_bundle(bet_type),
+        "line_bundle": line_bundle,
+        "market_bundle": market_bundle,
+        "learning_bundle": learning_bundle,
+        "pre_race_bundle": pre_race_bundle,
+        "ml_bundle": ml_bundle,
+        "notify_bundle": get_notification_bundle(
+            bet_type,
+            scores=score_bundle["scores"],
+            recommend=recommend_bundle,
+            pre_race=pre_race_bundle,
+            market=market_bundle,
+            persist=True,
+        ),
+        "backup_bundle": backup_bundle,
+        "pnl_bundle": get_pnl_bundle(bet_type, recommend=recommend_bundle, sync_virtual=False),
+        "collect_bundle": get_collect_bundle(TARGET_RACES),
+        "quality_bundle": quality_bundle,
+        "advanced_bundle": advanced_bundle,
+        "battle_bundle": battle_bundle,
+        "bankroll_bundle": bankroll_bundle,
+        "validation_bundle": validation_bundle,
+        "improvement_bundle": get_improvement_bundle(
+            bet_type,
+            validation=validation_bundle,
+            bankroll_plan=bankroll_bundle,
+        ),
+        "detect_df": detect_all(bet_type),
+    }
+
+
+def load_app_bundles_safe(bet_type: str, *, deep_check: bool = False) -> tuple[dict, str | None]:
+    try:
+        bundles = load_app_bundles(bet_type)
+        bundles["system_check_bundle"] = get_system_check_bundle(
+            bet_type,
+            deep=deep_check,
+            quality=bundles["quality_bundle"],
+            score_bundle=bundles["score_bundle"],
+            learning_bundle=bundles["learning_bundle"],
+            backup_bundle=bundles["backup_bundle"],
+        )
+        return bundles, None
+    except Exception as e:
+        score = empty_score_bundle()
+        rec = empty_recommend_bundle()
+        battle = empty_battle_bundle()
+        validation = empty_validation_bundle()
+        try:
+            ops = get_ops_status(bet_type, fast=True, targets_count=0)
+        except Exception:
+            ops = {"last_finished_at": "—", "auto_enabled": False}
+        try:
+            backup = get_backup_bundle()
+        except Exception:
+            backup = {"backups": [], "latest_at": None, "db_size_bytes": 0}
+        empty = {
+            "analyze_text": NO_DATA_MESSAGE,
+            "ai_bundle": {"overall": {}, "metrics": pd.DataFrame(), "venue_trends": pd.DataFrame()},
+            "score_bundle": score,
+            "recommend_bundle": rec,
+            "ops_status": ops,
+            "charts_bundle": {"has_data": False},
+            "line_bundle": {"has_data": False},
+            "market_bundle": {"has_data": False, "needs_poll_hint": False},
+            "learning_bundle": {"has_data": False, "learning_count": 0, "patterns": pd.DataFrame()},
+            "pre_race_bundle": {},
+            "ml_bundle": {"has_model": False},
+            "notify_bundle": {
+                "candidate_count": 0,
+                "high_score": [],
+                "danger_popular": [],
+                "odds_surge": [],
+                "candidates": [],
+            },
+            "backup_bundle": backup,
+            "pnl_bundle": {"summary_actual": {"pending": 0}},
+            "collect_bundle": {"remaining": TARGET_RACES},
+            "quality_bundle": {"valid_races": 0, "valid_pct": 0, "total_races": 0},
+            "advanced_bundle": {"patterns": pd.DataFrame()},
+            "battle_bundle": battle,
+            "bankroll_bundle": {},
+            "validation_bundle": validation,
+            "improvement_bundle": {"top5_proposals": pd.DataFrame(), "weaknesses": [], "strengths": []},
+            "system_check_bundle": {"overall_status": "warn", "checks_df": pd.DataFrame()},
+            "detect_df": pd.DataFrame(),
+        }
+        return empty, str(e)
 
 
 def run_workflow(
@@ -131,7 +295,7 @@ def run_workflow(
 ) -> tuple[bool, str]:
     log: list[str] = []
     try:
-        init_db()
+        ensure_db()
         log.append(f"開催日: {kaisai_date} / 取得上限: {limit}件")
         log.append("STEP 1/4: レース取得中...")
         results = fetch_daily(
@@ -303,6 +467,9 @@ st.set_page_config(
 
 inject_mobile_style()
 
+# Streamlit Cloud: 起動直後に DB / テーブルを作成（サイドバーより前）
+ensure_db()
+
 st.title("🚴 競輪観測AI")
 st.caption("🏠 運用モード — ホームから毎日の判断")
 
@@ -357,74 +524,41 @@ if run_btn:
         st.text(log_text)
     st.rerun()
 
-init_db()
+_check_deep = st.session_state.pop("system_check_deep", False)
+_bundles, _bundle_error = load_app_bundles_safe(bet_type, deep_check=_check_deep)
+
+analyze_text = _bundles["analyze_text"]
+ai_bundle = _bundles["ai_bundle"]
+score_bundle = _bundles["score_bundle"]
+recommend_bundle = _bundles["recommend_bundle"]
+ops_status = _bundles["ops_status"]
+charts_bundle = _bundles["charts_bundle"]
+line_bundle = _bundles["line_bundle"]
+market_bundle = _bundles["market_bundle"]
+learning_bundle = _bundles["learning_bundle"]
+pre_race_bundle = _bundles["pre_race_bundle"]
+ml_bundle = _bundles["ml_bundle"]
+notify_bundle = _bundles["notify_bundle"]
+backup_bundle = _bundles["backup_bundle"]
+pnl_bundle = _bundles["pnl_bundle"]
+collect_bundle = _bundles["collect_bundle"]
+quality_bundle = _bundles["quality_bundle"]
+advanced_bundle = _bundles["advanced_bundle"]
+battle_bundle = _bundles["battle_bundle"]
+bankroll_bundle = _bundles["bankroll_bundle"]
+validation_bundle = _bundles["validation_bundle"]
+improvement_bundle = _bundles["improvement_bundle"]
+system_check_bundle = _bundles["system_check_bundle"]
+detect_df = _bundles["detect_df"]
+
+if status["races"] == 0:
+    st.info(NO_DATA_MESSAGE)
+elif _bundle_error:
+    st.warning(f"一部データの読み込みに失敗しました: {_bundle_error}")
 
 if "ops_scheduler_started" not in st.session_state:
     st.session_state.ops_scheduler_started = True
     start_scheduler_thread(bet_type)
-
-analyze_text = lines_to_text(build_analyze_lines(bet_type))
-ai_bundle = get_ai_insights_bundle(bet_type)
-score_bundle = get_ai_score_bundle(bet_type)
-recommend_bundle = get_ai_recommend_bundle(
-    bet_type, scores=score_bundle["scores"]
-)
-ops_status = get_ops_status(
-    bet_type,
-    fast=True,
-    targets_count=len(recommend_bundle.get("targets") or []),
-)
-charts_bundle = get_charts_bundle(bet_type)
-line_bundle = get_line_analysis_bundle()
-market_bundle = get_market_monitor_bundle(bet_type)
-learning_bundle = get_learning_bundle(bet_type, refresh=True)
-pre_race_bundle = get_pre_race_bundle(bet_type)
-ml_bundle = get_ml_bundle(bet_type, scores=score_bundle["scores"], retrain=False)
-notify_bundle = get_notification_bundle(
-    bet_type,
-    scores=score_bundle["scores"],
-    recommend=recommend_bundle,
-    pre_race=pre_race_bundle,
-    market=market_bundle,
-    persist=True,
-)
-backup_bundle = get_backup_bundle()
-pnl_bundle = get_pnl_bundle(bet_type, recommend=recommend_bundle, sync_virtual=False)
-collect_bundle = get_collect_bundle(TARGET_RACES)
-quality_bundle = get_quality_bundle(bet_type)
-advanced_bundle = get_advanced_learning_bundle(bet_type, retrain=False)
-battle_bundle = get_battle_judge_bundle(
-    bet_type,
-    scores=score_bundle["scores"],
-    market=market_bundle,
-    line=line_bundle,
-    pre_race=pre_race_bundle,
-    ml=ml_bundle,
-    quality=quality_bundle,
-    advanced=advanced_bundle,
-)
-bankroll_bundle = get_bankroll_bundle(bet_type, battle_bundle=battle_bundle)
-validation_bundle = get_validation_bundle(
-    bet_type,
-    battle_bundle=battle_bundle,
-    bankroll_plan=bankroll_bundle,
-    sync_virtual=True,
-)
-improvement_bundle = get_improvement_bundle(
-    bet_type,
-    validation=validation_bundle,
-    bankroll_plan=bankroll_bundle,
-)
-_check_deep = st.session_state.pop("system_check_deep", False)
-system_check_bundle = get_system_check_bundle(
-    bet_type,
-    deep=_check_deep,
-    quality=quality_bundle,
-    score_bundle=score_bundle,
-    learning_bundle=learning_bundle,
-    backup_bundle=backup_bundle,
-)
-detect_df = detect_all(bet_type)
 
 last_updated = get_last_updated_at(ops_status)
 ai_status = build_ai_status_summary(
@@ -585,7 +719,7 @@ with tab_home:
     elif rec.get("has_data"):
         st.info("本日の狙い目はありません — 見送り中心の日です")
     else:
-        st.warning("データがありません — ①の自動実行を押してください")
+        st.warning(NO_DATA_MESSAGE)
 
     st.divider()
 

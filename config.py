@@ -7,7 +7,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 
 # データ保存先
 DATA_DIR = PROJECT_ROOT / "data"
-DATA_DIR.mkdir(exist_ok=True)
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 # SQLite
 DB_PATH = DATA_DIR / "keirin.db"

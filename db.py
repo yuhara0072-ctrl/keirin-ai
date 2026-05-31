@@ -55,10 +55,50 @@ CREATE INDEX IF NOT EXISTS idx_odds_captured ON odds(captured_at);
 
 
 def get_connection() -> sqlite3.Connection:
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
+
+
+def table_exists(conn: sqlite3.Connection, name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+        (name,),
+    ).fetchone()
+    return row is not None
+
+
+def safe_table_count(conn: sqlite3.Connection, table: str) -> int:
+    allowed = {"races", "results", "odds", "entries"}
+    if table not in allowed or not table_exists(conn, table):
+        return 0
+    return int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+
+
+def get_db_status() -> dict:
+    """テーブル未作成時も落ちない件数サマリー（Streamlit Cloud 向け）"""
+    try:
+        ensure_db()
+        conn = get_connection()
+        try:
+            return {
+                "races": safe_table_count(conn, "races"),
+                "results": safe_table_count(conn, "results"),
+                "odds": safe_table_count(conn, "odds"),
+                "ready": table_exists(conn, "races"),
+            }
+        finally:
+            conn.close()
+    except Exception:
+        return {"races": 0, "results": 0, "odds": 0, "ready": False}
+
+
+def ensure_db() -> None:
+    """アプリ起動時に DB と全テーブルを idempotent に作成"""
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    init_db()
 
 
 @contextmanager
@@ -76,6 +116,8 @@ def db_session() -> Iterator[sqlite3.Connection]:
 
 def migrate_db(conn: sqlite3.Connection) -> None:
     """既存DBへカラム追加"""
+    if not table_exists(conn, "races"):
+        return
     cols = {row[1] for row in conn.execute("PRAGMA table_info(races)")}
     if "race_start" not in cols:
         conn.execute("ALTER TABLE races ADD COLUMN race_start TEXT")
