@@ -19,6 +19,7 @@ data/
 # 環境変数・秘密情報
 .env
 .env.*
+.streamlit/secrets.toml
 
 # エディタ・OS
 .vscode/

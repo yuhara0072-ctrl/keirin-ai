@@ -183,6 +183,7 @@ from ui_mobile import (
     render_line_card,
     render_target_card,
 )
+from auth import render_logout_control, require_authentication
 from config import DAILY_FETCH_LIMIT, DATA_DIR, DEFAULT_BANKROLL, TARGET_RACES
 from data_progress import get_data_progress_bundle
 from db import ensure_db, get_db_status, init_db
@@ -558,6 +559,9 @@ st.set_page_config(
 
 inject_mobile_style()
 
+if not require_authentication():
+    st.stop()
+
 # Streamlit Cloud: 起動直後に DB / テーブルを作成（サイドバーより前）
 ensure_db()
 
@@ -565,6 +569,8 @@ st.title("🚴 競輪観測AI")
 st.caption("🏠 運用モード — ホームから毎日の判断")
 
 with st.sidebar:
+    render_logout_control()
+    st.divider()
     st.header("毎日の操作")
 
     with st.expander("📥 データ取得", expanded=True):
