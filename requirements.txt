@@ -1,0 +1,11 @@
+# 競輪観測AI — 最小依存（環境構築用）
+# Python 3.11 以上を推奨
+
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+lxml>=5.0.0
+pandas>=2.2.0
+plotly>=5.18.0
+streamlit>=1.32.0
+xgboost>=2.0.0
+scikit-learn>=1.4.0

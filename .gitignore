@@ -1,0 +1,31 @@
+# 仮想環境
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# データベース・データ（ローカル保存）
+*.db
+*.sqlite
+*.sqlite3
+data/
+
+# 環境変数・秘密情報
+.env
+.env.*
+
+# エディタ・OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ログ・一時ファイル
+*.log
+*.tmp
