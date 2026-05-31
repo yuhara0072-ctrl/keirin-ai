@@ -47,8 +47,10 @@ from bankroll import (
 )
 from validation_report import (
     build_validation_lines,
+    empty_validation_report,
     get_validation_bundle,
     run_daily_validation,
+    safe_validation_period,
     save_validation_report,
 )
 from improvement_ai import (
@@ -148,11 +150,7 @@ def empty_battle_bundle() -> dict:
 
 
 def empty_validation_bundle() -> dict:
-    return {
-        "today": {"summary": {"settled": 0}},
-        "week": {"summary": {"settled": 0, "recovery_rate": None}},
-        "has_data": False,
-    }
+    return empty_validation_report()
 
 
 def load_app_bundles(bet_type: str) -> dict:
@@ -1091,7 +1089,7 @@ with tab_validation:
     st.subheader("検証レポート")
     st.caption("AIおすすめ・実戦判定・資金管理の成績を日次/週次/月次で自動検証します。")
 
-    vb = validation_bundle
+    vb = validation_bundle if isinstance(validation_bundle, dict) else empty_validation_report(bet_type)
 
     col_run, col_save = st.columns(2)
     with col_run:
@@ -1109,89 +1107,98 @@ with tab_validation:
             )
             st.success(f"保存: {path.name}")
 
-    def _period_metrics(period: dict, label: str) -> None:
-        s = period.get("summary", {})
+    def _period_metrics(period: dict | None, label: str) -> None:
+        s = (period or {}).get("summary") or {}
         st.markdown(f"**{label}**")
-        if s.get("settled", 0) == 0:
+        settled = int(s.get("settled") or 0)
+        profit = int(s.get("total_profit") or 0)
+        recovery = s.get("recovery_rate")
+        hit = s.get("hit_rate")
+        mobile_metrics(
+            [
+                ("収支", f"{profit:,}円"),
+                ("回収率", f"{recovery if recovery is not None else 0}%"),
+                ("的中率", f"{hit if hit is not None else 0}%"),
+                ("件数", settled),
+            ]
+        )
+        if settled == 0:
             st.caption("確定データなし")
+
+    try:
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            _period_metrics(safe_validation_period(vb, "today"), "今日の成績")
+        with c2:
+            _period_metrics(safe_validation_period(vb, "week"), "今週の成績")
+        with c3:
+            _period_metrics(safe_validation_period(vb, "month"), "今月の成績")
+
+        st.markdown("#### 買わなかった候補（仮想成績・今日）")
+        tv = safe_validation_period(vb, "today_virtual").get("summary") or {}
+        if tv.get("settled", 0) == 0:
+            st.caption("仮想データなし — 検証更新で同期されます")
         else:
-            mobile_metrics(
-                [
-                    ("収支", f"{s['total_profit']:,}円"),
-                    ("回収率", f"{s['recovery_rate']}%"),
-                    ("的中率", f"{s['hit_rate']}%"),
-                    ("件数", s["settled"]),
-                ]
+            st.info(
+                f"仮想: 収支{tv.get('total_profit', 0):,}円 / "
+                f"回収{tv.get('recovery_rate', 0)}% / "
+                f"的中{tv.get('hit_rate', 0)}% ({tv.get('settled', 0)}件)"
             )
 
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        _period_metrics(vb["today"], "今日の成績")
-    with c2:
-        _period_metrics(vb["week"], "今週の成績")
-    with c3:
-        _period_metrics(vb["month"], "今月の成績")
+        today_period = safe_validation_period(vb, "today")
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.markdown("#### AIスコア別回収率（今日）")
+            score_df = today_period.get("by_ai_score", pd.DataFrame())
+            if score_df is None or score_df.empty:
+                st.caption("データなし")
+            else:
+                st.dataframe(score_df, use_container_width=True, hide_index=True)
+        with col_b:
+            st.markdown("#### 判定別回収率（今日）")
+            verdict_df = today_period.get("by_verdict", pd.DataFrame())
+            if verdict_df is None or verdict_df.empty:
+                st.caption("データなし")
+            else:
+                st.dataframe(verdict_df, use_container_width=True, hide_index=True)
 
-    st.markdown("#### 買わなかった候補（仮想成績・今日）")
-    tv = vb["today_virtual"]["summary"]
-    if tv.get("settled", 0) == 0:
-        st.caption("仮想データなし — 検証更新で同期されます")
-    else:
-        st.info(
-            f"仮想: 収支{tv['total_profit']:,}円 / 回収{tv['recovery_rate']}% / "
-            f"的中{tv['hit_rate']}% ({tv['settled']}件)"
-        )
-
-    col_a, col_b = st.columns(2)
-    with col_a:
-        st.markdown("#### AIスコア別回収率（今日）")
-        score_df = vb["today"]["by_ai_score"]
-        if score_df.empty:
+        st.markdown("#### 推奨金額別収支（今日）")
+        amount_df = today_period.get("by_amount", pd.DataFrame())
+        if amount_df is None or amount_df.empty:
             st.caption("データなし")
         else:
-            st.dataframe(score_df, use_container_width=True, hide_index=True)
-    with col_b:
-        st.markdown("#### 判定別回収率（今日）")
-        verdict_df = vb["today"]["by_verdict"]
-        if verdict_df.empty:
-            st.caption("データなし")
-        else:
-            st.dataframe(verdict_df, use_container_width=True, hide_index=True)
+            st.dataframe(amount_df, use_container_width=True, hide_index=True)
 
-    st.markdown("#### 推奨金額別収支（今日）")
-    amount_df = vb["today"]["by_amount"]
-    if amount_df.empty:
-        st.caption("データなし")
-    else:
-        st.dataframe(amount_df, use_container_width=True, hide_index=True)
+        col_strong, col_weak = st.columns(2)
+        with col_strong:
+            st.markdown("#### AIが強い条件 TOP10")
+            strong = vb.get("strong_conditions", pd.DataFrame())
+            if strong is None or strong.empty:
+                st.caption("なし")
+            else:
+                st.dataframe(strong, use_container_width=True, hide_index=True)
+        with col_weak:
+            st.markdown("#### AIが弱い条件 TOP10")
+            weak = vb.get("weak_conditions", pd.DataFrame())
+            if weak is None or weak.empty:
+                st.caption("なし")
+            else:
+                st.dataframe(weak, use_container_width=True, hide_index=True)
 
-    col_strong, col_weak = st.columns(2)
-    with col_strong:
-        st.markdown("#### AIが強い条件 TOP10")
-        strong = vb.get("strong_conditions", pd.DataFrame())
-        if strong.empty:
-            st.caption("なし")
-        else:
-            st.dataframe(strong, use_container_width=True, hide_index=True)
-    with col_weak:
-        st.markdown("#### AIが弱い条件 TOP10")
-        weak = vb.get("weak_conditions", pd.DataFrame())
-        if weak.empty:
-            st.caption("なし")
-        else:
-            st.dataframe(weak, use_container_width=True, hide_index=True)
+        st.markdown("#### 次に改善すべき項目")
+        for tip in vb.get("improvements") or []:
+            st.warning(tip)
 
-    st.markdown("#### 次に改善すべき項目")
-    for tip in vb.get("improvements") or []:
-        st.warning(tip)
+        hist = vb.get("history", pd.DataFrame())
+        if hist is not None and not hist.empty:
+            st.markdown("#### 検証履歴")
+            st.dataframe(hist, use_container_width=True, hide_index=True)
 
-    hist = vb.get("history", pd.DataFrame())
-    if not hist.empty:
-        st.markdown("#### 検証履歴")
-        st.dataframe(hist, use_container_width=True, hide_index=True)
-
-    with st.expander("テキストレポート"):
-        st.text(lines_to_text(vb.get("lines", [])))
+        with st.expander("テキストレポート"):
+            st.text(lines_to_text(vb.get("lines", [])))
+    except Exception as e:
+        st.warning(f"検証レポートの表示中にエラーが発生しました: {e}")
+        _period_metrics(safe_validation_period(vb, "month"), "今月の成績")
 
     with st.expander("自動検証について"):
         st.markdown(

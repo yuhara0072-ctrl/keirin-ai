@@ -129,6 +129,61 @@ def period_report(df: pd.DataFrame, label: str) -> dict:
     }
 
 
+def empty_period_summary() -> dict:
+    return {
+        "count": 0,
+        "total_bet": 0,
+        "total_payout": 0,
+        "total_profit": 0,
+        "recovery_rate": 0.0,
+        "hit_rate": 0.0,
+        "settled": 0,
+        "pending": 0,
+    }
+
+
+def empty_period_report(label: str = "") -> dict:
+    return {
+        "label": label,
+        "summary": empty_period_summary(),
+        "by_ai_score": pd.DataFrame(),
+        "by_verdict": pd.DataFrame(),
+        "by_rank": pd.DataFrame(),
+        "by_amount": pd.DataFrame(),
+        "settled_count": 0,
+    }
+
+
+def empty_validation_report(bet_type: str = "3連単") -> dict:
+    """検証データなし / Cloud初回用の空レポート"""
+    return {
+        "bet_type": bet_type,
+        "ref_date": date.today().strftime("%Y%m%d"),
+        "has_data": False,
+        "today": empty_period_report("今日"),
+        "today_virtual": empty_period_report("今日(仮想)"),
+        "week": empty_period_report("今週"),
+        "month": empty_period_report("今月"),
+        "strong_conditions": pd.DataFrame(),
+        "weak_conditions": pd.DataFrame(),
+        "improvements": [],
+        "lines": [],
+        "history": pd.DataFrame(),
+        "summary_all_actual": empty_period_summary(),
+        "summary_all_virtual": empty_period_summary(),
+        "streaks": {},
+        "quality_valid_pct": 0.0,
+    }
+
+
+def safe_validation_period(report: dict, key: str) -> dict:
+    """月次などキー欠落時も空期間（0件）を返す"""
+    period = report.get(key) if report else None
+    if isinstance(period, dict) and isinstance(period.get("summary"), dict):
+        return period
+    return empty_period_report(key)
+
+
 def sync_battle_virtual_bets(
     battle_bundle: dict,
     bankroll_plan: dict,
@@ -433,25 +488,30 @@ def get_validation_bundle(
     bankroll_plan: Optional[dict] = None,
     sync_virtual: bool = True,
 ) -> dict:
-    report = build_validation_report(
-        bet_type,
-        battle_bundle=battle_bundle,
-        bankroll_plan=bankroll_plan,
-        sync_virtual=sync_virtual,
-    )
-    report["lines"] = build_validation_lines(report)
-    conn = get_connection()
-    migrate_validation_table(conn)
-    runs = pd.read_sql(
-        """
-        SELECT started_at, bet_type, actual_recovery, virtual_recovery, report_path, status
-        FROM validation_runs ORDER BY id DESC LIMIT 10
-        """,
-        conn,
-    )
-    conn.close()
-    report["history"] = runs
-    return report
+    try:
+        report = build_validation_report(
+            bet_type,
+            battle_bundle=battle_bundle,
+            bankroll_plan=bankroll_plan,
+            sync_virtual=sync_virtual,
+        )
+        report["lines"] = build_validation_lines(report)
+        conn = get_connection()
+        migrate_validation_table(conn)
+        runs = pd.read_sql(
+            """
+            SELECT started_at, bet_type, actual_recovery, virtual_recovery, report_path, status
+            FROM validation_runs ORDER BY id DESC LIMIT 10
+            """,
+            conn,
+        )
+        conn.close()
+        report["history"] = runs
+        return report
+    except Exception:
+        report = empty_validation_report(bet_type)
+        report["lines"] = []
+        return report
 
 
 def _summary_line(s: dict, label: str) -> str:
@@ -464,19 +524,22 @@ def _summary_line(s: dict, label: str) -> str:
 
 
 def build_validation_lines(report: Optional[dict] = None, bet_type: str = "3連単") -> list[str]:
-    r = report or build_validation_report(bet_type)
+    try:
+        r = report or build_validation_report(bet_type)
+    except Exception:
+        r = empty_validation_report(bet_type)
     lines = [
         f"【検証レポート】券種={bet_type}  基準日={r.get('ref_date', '')}",
         "",
         "=== 日次 ===",
-        _summary_line(r["today"]["summary"], "実購入"),
-        _summary_line(r["today_virtual"]["summary"], "仮想(未購入)"),
+        _summary_line(safe_validation_period(r, "today")["summary"], "実購入"),
+        _summary_line(safe_validation_period(r, "today_virtual")["summary"], "仮想(未購入)"),
         "",
         "=== 週次 ===",
-        _summary_line(r["week"]["summary"], "実購入"),
+        _summary_line(safe_validation_period(r, "week")["summary"], "実購入"),
         "",
         "=== 月次 ===",
-        _summary_line(r["month"]["summary"], "実購入"),
+        _summary_line(safe_validation_period(r, "month")["summary"], "実購入"),
         "",
     ]
 
@@ -485,7 +548,7 @@ def build_validation_lines(report: Optional[dict] = None, bet_type: str = "3連�
         ("判定別回収率(今日)", ("today", "by_verdict")),
         ("推奨金額別収支(今日)", ("today", "by_amount")),
     ]:
-        block = r[key[0]][key[1]]
+        block = safe_validation_period(r, key[0]).get(key[1], pd.DataFrame())
         lines.append(f"--- {title} ---")
         if block.empty:
             lines.append("  （データなし）")
