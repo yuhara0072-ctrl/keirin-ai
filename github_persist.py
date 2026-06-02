@@ -345,25 +345,45 @@ def _github_get_file(name: str) -> tuple[Optional[str], Optional[str]]:
     return content, body.get("sha")
 
 
-def _github_put_file(name: str, content: str, message: str) -> None:
-    _, sha = _github_get_file(name)
+def _github_put_file(name: str, content: str, message: str) -> dict[str, Any]:
+    """GitHub Contents API で1ファイル更新。status_code 等を返す"""
     url = f"https://api.github.com/repos/{GITHUB_REPO.strip()}/contents/{PERSIST_DIR.name}/{name}"
-    payload: dict[str, Any] = {
-        "message": message,
-        "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
-        "branch": GITHUB_PERSIST_BRANCH,
-    }
-    if sha:
-        payload["sha"] = sha
-    resp = requests.put(
-        url,
-        headers=_api_headers(),
-        json=payload,
-        timeout=GITHUB_REQUEST_TIMEOUT,
-    )
-    if resp.status_code >= 400:
-        detail = resp.text[:500]
-        raise RuntimeError(f"GitHub PUT {name} failed ({resp.status_code}): {detail}")
+    try:
+        _, sha = _github_get_file(name)
+        payload: dict[str, Any] = {
+            "message": message,
+            "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
+            "branch": GITHUB_PERSIST_BRANCH,
+        }
+        if sha:
+            payload["sha"] = sha
+        resp = requests.put(
+            url,
+            headers=_api_headers(),
+            json=payload,
+            timeout=GITHUB_REQUEST_TIMEOUT,
+        )
+        status_code = resp.status_code
+        if status_code >= 400:
+            return {
+                "ok": False,
+                "file": name,
+                "status_code": status_code,
+                "error_message": resp.text[:500],
+            }
+        return {
+            "ok": True,
+            "file": name,
+            "status_code": status_code,
+            "error_message": "",
+        }
+    except requests.RequestException as exc:
+        return {
+            "ok": False,
+            "file": name,
+            "status_code": 0,
+            "error_message": str(exc),
+        }
 
 
 def _ordered_file_names(files: dict[str, Any]) -> list[str]:
@@ -453,10 +473,19 @@ def sync_to_github(
         "message": "",
         "errors": [],
         "push_log": push_log,
+        "races_json_put": {
+            "ok": False,
+            "file": "races.json",
+            "status_code": None,
+            "error_message": "",
+            "skipped": True,
+        },
     }
 
     if not is_github_enabled():
+        result["ok"] = False
         result["message"] = "local only (GITHUB_TOKEN / GITHUB_REPO 未設定)"
+        result["races_json_put"]["error_message"] = result["message"]
         _emit_log(log_fn, result["message"])
         return result
 
@@ -465,6 +494,7 @@ def sync_to_github(
         result["message"] = (
             f"GitHub同期を中止: DB={db_races_before}件 なのに export=0件 ({DB_PATH})"
         )
+        result["races_json_put"]["error_message"] = result["message"]
         _emit_log(log_fn, result["message"])
         return result
 
@@ -480,10 +510,27 @@ def sync_to_github(
             text = json.dumps(files[name], ensure_ascii=False, separators=(",", ":"))
             size = len(text.encode("utf-8"))
             _emit_log(log_fn, f"GitHub PUT {name} ({size} bytes)...")
-            _github_put_file(name, text, commit_msg)
+            put_result = _github_put_file(name, text, commit_msg)
+            if name == "races.json":
+                result["races_json_put"] = put_result
+                status = put_result.get("status_code")
+                _emit_log(
+                    log_fn,
+                    f"GitHub PUT races.json 結果={'OK' if put_result.get('ok') else '失敗'} "
+                    f"HTTP={status if status is not None else 'N/A'}",
+                )
+                if put_result.get("error_message"):
+                    _emit_log(log_fn, f"GitHub PUT races.json エラー: {put_result['error_message']}")
+            if not put_result.get("ok"):
+                raise RuntimeError(
+                    f"GitHub PUT {name} failed (HTTP {put_result.get('status_code')}): "
+                    f"{put_result.get('error_message')}"
+                )
             pushed.append(name)
-            push_log.append(f"{name}: OK ({size} bytes)")
-            _emit_log(log_fn, f"GitHub PUT {name} → OK")
+            push_log.append(
+                f"{name}: OK HTTP {put_result.get('status_code')} ({size} bytes)"
+            )
+            _emit_log(log_fn, f"GitHub PUT {name} → OK HTTP {put_result.get('status_code')}")
         result["github"] = True
         result["message"] = (
             f"github synced ({exported_races} races, {exported_results} results)"
@@ -493,12 +540,40 @@ def sync_to_github(
         result["ok"] = False
         result["errors"] = pushed
         result["message"] = str(exc)
+        if not result["races_json_put"].get("error_message"):
+            result["races_json_put"]["error_message"] = str(exc)
         push_log.append(f"ERROR: {exc}")
         _emit_log(log_fn, f"GitHub push 失敗: {exc}")
         if pushed:
             _emit_log(log_fn, f"push済みファイル: {', '.join(pushed)}")
     result["push_log"] = push_log
     return result
+
+
+def format_workflow_persist_detail(result: dict) -> list[str]:
+    """workflow 終了時に必ず出す github_persist 詳細ログ"""
+    put = result.get("races_json_put") or {}
+    status_code = put.get("status_code")
+    if put.get("skipped"):
+        put_label = "スキップ"
+    elif put.get("ok"):
+        put_label = "OK"
+    else:
+        put_label = "失敗"
+
+    error_msg = put.get("error_message") or result.get("message") or "なし"
+    if error_msg == "なし" and result.get("ok") and result.get("github"):
+        error_msg = "なし"
+
+    return [
+        "--- github_persist 詳細 ---",
+        f"DB内 race件数: {result.get('db_race_count', 0)}",
+        f"export対象 race件数: {result.get('race_count', 0)}",
+        f"GITHUB_REPO: {result.get('github_repo') or GITHUB_REPO or '(未設定)'}",
+        f"GitHub PUT races.json 結果: {put_label}",
+        f"HTTPステータス: {status_code if status_code is not None else 'N/A'}",
+        f"エラーメッセージ: {error_msg}",
+    ]
 
 
 def workflow_persist_and_sync(reason: str = "workflow") -> tuple[dict, list[str]]:
@@ -513,6 +588,7 @@ def workflow_persist_and_sync(reason: str = "workflow") -> tuple[dict, list[str]
     lines.append(f"  GITHUB_TOKEN={'設定済' if GITHUB_TOKEN else '未設定'}")
     lines.append(f"  GITHUB_BRANCH={GITHUB_PERSIST_BRANCH}")
 
+    result: dict
     try:
         result = sync_to_github(reason, log_fn=log_fn)
     except Exception as exc:
@@ -521,13 +597,21 @@ def workflow_persist_and_sync(reason: str = "workflow") -> tuple[dict, list[str]
             "github": False,
             "message": str(exc),
             "db_path": str(DB_PATH),
+            "db_race_count": _db_race_count(),
+            "race_count": 0,
+            "github_repo": GITHUB_REPO,
             "push_log": [],
+            "races_json_put": {
+                "ok": False,
+                "file": "races.json",
+                "status_code": None,
+                "error_message": str(exc),
+                "skipped": False,
+            },
         }
         lines.append(f"  永続化エラー: {exc}")
 
-    lines.append(f"  結果: {format_sync_result(result)}")
-    for entry in result.get("push_log") or []:
-        lines.append(f"  push: {entry}")
+    lines.extend(format_workflow_persist_detail(result))
     return result, lines
 
 
