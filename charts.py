@@ -1,6 +1,7 @@
 """グラフ用データ集計と Plotly チャート生成"""
 
-from typing import Optional
+import logging
+from typing import Callable, Optional
 
 import pandas as pd
 import plotly.express as px
@@ -9,6 +10,8 @@ import plotly.graph_objects as go
 from ai_score import build_race_scores
 from analyze import analyze_by_venue, load_bet_frame
 from db import get_connection
+
+logger = logging.getLogger(__name__)
 
 HIGH_SCORE_DEFAULT = 65
 PLOTLY_TEMPLATE = "plotly_white"
@@ -19,17 +22,53 @@ COLOR_SCORE = "#7c3aed"
 
 def _ensure_columns(df: pd.DataFrame, defaults: dict[str, object]) -> pd.DataFrame:
     """欠損カラムを補完（Plotly hover_data / 軸参照の落ち込み防止）"""
-    if df.empty:
-        return df
     out = df.copy()
     for col, default in defaults.items():
         if col not in out.columns:
-            out[col] = default
+            if out.empty:
+                out[col] = pd.Series(dtype="object")
+            else:
+                out[col] = default
+    return out
+
+
+def _coalesce_column(df: pd.DataFrame, base: str) -> pd.DataFrame:
+    """merge 後の hit_rate_x / hit_rate_y 等を base に統合"""
+    if base in df.columns:
+        return df
+    out = df.copy()
+    x, y = f"{base}_x", f"{base}_y"
+    if x in out.columns and y in out.columns:
+        out[base] = out[x].combine_first(out[y])
+        out = out.drop(columns=[x, y], errors="ignore")
+    elif x in out.columns:
+        out[base] = out[x]
+        out = out.drop(columns=[x], errors="ignore")
+    elif y in out.columns:
+        out[base] = out[y]
+        out = out.drop(columns=[y], errors="ignore")
     return out
 
 
 def _hover_data_existing(df: pd.DataFrame, columns: list[str]) -> list[str]:
-    return [c for c in columns if c in df.columns]
+    """DataFrame に実在する列だけを hover_data に渡す"""
+    seen: set[str] = set()
+    out: list[str] = []
+    for col in columns:
+        if col in df.columns and col not in seen:
+            seen.add(col)
+            out.append(col)
+    return out
+
+
+def _safe_chart(build: Callable[[], go.Figure], title: str) -> go.Figure:
+    try:
+        return build()
+    except Exception as exc:
+        logger.warning("chart build failed (%s): %s", title, exc)
+        fig = go.Figure()
+        fig.update_layout(title=f"{title}（生成エラー）", template=PLOTLY_TEMPLATE)
+        return fig
 
 
 def _race_summary(bet_type: str = "3連単") -> pd.DataFrame:
@@ -317,57 +356,69 @@ def fig_ai_score_scatter(scores: pd.DataFrame, bet_type: str = "3連単") -> go.
         fig.update_layout(title="スコア×回収率（データなし）", template=PLOTLY_TEMPLATE)
         return fig
 
-    summary = _race_summary(bet_type)
-    merge_cols = ["race_id", "recovery_rate", "hit_rate"]
-    if summary.empty:
-        merged = scores.copy()
-    else:
-        available = [c for c in merge_cols if c in summary.columns]
-        merged = scores.merge(summary[available], on="race_id", how="left")
+    try:
+        summary = _race_summary(bet_type)
+        merge_cols = ["race_id", "recovery_rate", "hit_rate"]
+        if summary.empty:
+            merged = scores.copy()
+        else:
+            available = [c for c in merge_cols if c in summary.columns]
+            merged = scores.merge(summary[available], on="race_id", how="left")
 
-    merged = _ensure_columns(
-        merged,
-        {
-            "recovery_rate": None,
-            "hit_rate": None,
-            "venue_name": "",
-            "race_no": None,
-            "ev_rank": "",
-            "honmei_trust": 1.0,
-            "ai_total_score": 0.0,
-        },
-    )
+        for col in ("recovery_rate", "hit_rate"):
+            merged = _coalesce_column(merged, col)
 
-    scatter_kwargs: dict = {
-        "x": "ai_total_score",
-        "y": "recovery_rate",
-        "color": "ev_rank",
-        "hover_data": _hover_data_existing(
+        merged = _ensure_columns(
+            merged,
+            {
+                "recovery_rate": None,
+                "hit_rate": None,
+                "venue_name": "",
+                "race_no": None,
+                "ev_rank": "",
+                "honmei_trust": 1.0,
+                "ai_total_score": 0.0,
+            },
+        )
+
+        hover_cols = _hover_data_existing(
             merged, ["venue_name", "race_no", "ev_rank", "hit_rate"]
-        ),
-        "labels": {
-            "ai_total_score": "AI総合スコア",
-            "recovery_rate": "回収率 (%)",
-            "ev_rank": "ランク",
-        },
-        "color_discrete_map": {
-            "S": "#059669",
-            "A": "#2563eb",
-            "B": "#ca8a04",
-            "C": "#ea580c",
-            "D": "#94a3b8",
-        },
-    }
-    if merged["honmei_trust"].notna().any():
-        scatter_kwargs["size"] = "honmei_trust"
+        )
 
-    fig = px.scatter(merged, **scatter_kwargs)
-    fig.update_layout(
-        title="AIスコアと回収率（バブル＝本命信頼度）",
-        template=PLOTLY_TEMPLATE,
-        height=400,
-    )
-    return fig
+        scatter_kwargs: dict = {
+            "x": "ai_total_score",
+            "y": "recovery_rate",
+            "color": "ev_rank",
+            "labels": {
+                "ai_total_score": "AI総合スコア",
+                "recovery_rate": "回収率 (%)",
+                "ev_rank": "ランク",
+            },
+            "color_discrete_map": {
+                "S": "#059669",
+                "A": "#2563eb",
+                "B": "#ca8a04",
+                "C": "#ea580c",
+                "D": "#94a3b8",
+            },
+        }
+        if hover_cols:
+            scatter_kwargs["hover_data"] = hover_cols
+        if "honmei_trust" in merged.columns and merged["honmei_trust"].notna().any():
+            scatter_kwargs["size"] = "honmei_trust"
+
+        fig = px.scatter(merged, **scatter_kwargs)
+        fig.update_layout(
+            title="AIスコアと回収率（バブル＝本命信頼度）",
+            template=PLOTLY_TEMPLATE,
+            height=400,
+        )
+        return fig
+    except Exception as exc:
+        logger.warning("fig_ai_score_scatter failed: %s", exc)
+        fig = go.Figure()
+        fig.update_layout(title="スコア×回収率（表示エラー）", template=PLOTLY_TEMPLATE)
+        return fig
 
 
 def get_charts_bundle(
@@ -391,10 +442,22 @@ def get_charts_bundle(
         "scores": scores,
         "high_score_races": high,
         "min_score": min_score,
-        "fig_recovery_trend": fig_recovery_trend(summary, by_date),
-        "fig_recovery_by_date": fig_recovery_by_date(by_date),
-        "fig_venue_ranking": fig_venue_ranking(venue),
-        "fig_ai_distribution": fig_ai_score_distribution(scores),
-        "fig_hit_rate": fig_hit_rate_trend(summary, by_date),
-        "fig_score_scatter": fig_ai_score_scatter(scores, bet_type),
+        "fig_recovery_trend": _safe_chart(
+            lambda: fig_recovery_trend(summary, by_date), "回収率推移"
+        ),
+        "fig_recovery_by_date": _safe_chart(
+            lambda: fig_recovery_by_date(by_date), "開催日別回収率"
+        ),
+        "fig_venue_ranking": _safe_chart(
+            lambda: fig_venue_ranking(venue), "競輪場別回収率"
+        ),
+        "fig_ai_distribution": _safe_chart(
+            lambda: fig_ai_score_distribution(scores), "AIスコア分布"
+        ),
+        "fig_hit_rate": _safe_chart(
+            lambda: fig_hit_rate_trend(summary, by_date), "的中率推移"
+        ),
+        "fig_score_scatter": _safe_chart(
+            lambda: fig_ai_score_scatter(scores, bet_type), "スコア×回収率"
+        ),
     }

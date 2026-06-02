@@ -189,6 +189,7 @@ from auth import (
     render_logout_control,
     require_authentication,
 )
+from ui_guard import safe_call, safe_page, safe_plotly_chart
 from config import DAILY_FETCH_LIMIT, DATA_DIR, DEFAULT_BANKROLL, TARGET_RACES
 from data_progress import get_data_progress_bundle
 from db import ensure_db, get_db_status, init_db
@@ -334,10 +335,15 @@ def load_app_bundles_cached(bet_type: str, *, deep_check: bool = False) -> tuple
     cache_key = f"bundles_{bet_type}_{deep_check}"
     if cache_key in st.session_state:
         return st.session_state[cache_key]
-    with st.spinner("アプリデータを読み込み中..."):
+    try:
+        with st.spinner("アプリデータを読み込み中..."):
+            bundles, err = load_app_bundles_safe(bet_type, deep_check=deep_check)
+        st.session_state[cache_key] = (bundles, err)
+        return bundles, err
+    except Exception as exc:
+        print(f"[app] bundle cache error: {exc}", flush=True)
         bundles, err = load_app_bundles_safe(bet_type, deep_check=deep_check)
-    st.session_state[cache_key] = (bundles, err)
-    return bundles, err
+        return bundles, err
 
 
 def load_app_bundles_safe(bet_type: str, *, deep_check: bool = False) -> tuple[dict, str | None]:
@@ -593,40 +599,41 @@ except Exception as _bootstrap_exc:
 st.title("🚴 競輪観測AI")
 st.caption("🏠 運用モード — ホームから毎日の判断")
 
-with st.sidebar:
-    render_logout_control()
-    st.divider()
-    st.header("毎日の操作")
+with safe_page("サイドバー"):
+    with st.sidebar:
+        render_logout_control()
+        st.divider()
+        st.header("毎日の操作")
 
-    with st.expander("📥 データ取得", expanded=True):
-        selected = st.date_input("開催日", value=date.today())
-        kaisai_date = selected.strftime("%Y%m%d")
-        limit = st.number_input(
-            "取得件数", min_value=1, max_value=30, value=DAILY_FETCH_LIMIT, step=1
-        )
-        with_result = st.checkbox("結果・払戻も取得", value=True)
-        venue_code = st.text_input("場コード（任意）", value="", placeholder="例: 56")
-        run_btn = st.button("▶ workflow 実行", type="primary", use_container_width=True)
+        with st.expander("📥 データ取得", expanded=True):
+            selected = st.date_input("開催日", value=date.today())
+            kaisai_date = selected.strftime("%Y%m%d")
+            limit = st.number_input(
+                "取得件数", min_value=1, max_value=30, value=DAILY_FETCH_LIMIT, step=1
+            )
+            with_result = st.checkbox("結果・払戻も取得", value=True)
+            venue_code = st.text_input("場コード（任意）", value="", placeholder="例: 56")
+            run_btn = st.button("▶ workflow 実行", type="primary", use_container_width=True)
 
-    with st.expander("⚙ 券種・分析", expanded=False):
-        bet_type = st.selectbox(
-            "分析券種",
-            ["3連単", "2車単", "2車複", "3連複", "ワイド"],
-            index=0,
-        )
+        with st.expander("⚙ 券種・分析", expanded=False):
+            bet_type = st.selectbox(
+                "分析券種",
+                ["3連単", "2車単", "2車複", "3連複", "ワイド"],
+                index=0,
+            )
 
-    status = db_status()
-    with st.expander("📊 データ件数", expanded=True):
-        mobile_metrics(
-            [
-                ("レース", status["races"]),
-                ("結果", status["results"]),
-                ("オッズ", status["odds"]),
-            ],
-            per_row=1,
-        )
+        status = db_status()
+        with st.expander("📊 データ件数", expanded=True):
+            mobile_metrics(
+                [
+                    ("レース", status["races"]),
+                    ("結果", status["results"]),
+                    ("オッズ", status["odds"]),
+                ],
+                per_row=1,
+            )
 
-    st.caption("🏠 ホームで完結 — データ収集と検証を優先")
+        st.caption("🏠 ホームで完結 — データ収集と検証を優先")
 
 if run_btn:
     venue = venue_code.strip() or None
@@ -665,7 +672,9 @@ if run_btn:
 _check_deep = st.session_state.pop("system_check_deep", False)
 if _check_deep:
     invalidate_bundles_cache()
-_bundles, _bundle_error = load_app_bundles_cached(bet_type, deep_check=_check_deep)
+
+with safe_page("データ読み込み"):
+    _bundles, _bundle_error = load_app_bundles_cached(bet_type, deep_check=_check_deep)
 
 analyze_text = _bundles["analyze_text"]
 ai_bundle = _bundles["ai_bundle"]
@@ -691,39 +700,46 @@ improvement_bundle = _bundles["improvement_bundle"]
 system_check_bundle = _bundles["system_check_bundle"]
 detect_df = _bundles["detect_df"]
 
-if status["races"] == 0:
-    st.info(NO_DATA_MESSAGE)
-elif _bundle_error:
-    st.warning(f"一部データの読み込みに失敗しました: {_bundle_error}")
+with safe_page("ダッシュボード"):
+    if status["races"] == 0:
+        st.info(NO_DATA_MESSAGE)
+    elif _bundle_error:
+        st.warning(f"一部データの読み込みに失敗しました: {_bundle_error}")
 
-if "ops_scheduler_started" not in st.session_state:
-    st.session_state.ops_scheduler_started = True
-    start_scheduler_thread(bet_type)
+last_updated = "—"
+ai_status: dict = {}
+today_todos: list = []
+data_progress: dict = {}
 
-last_updated = get_last_updated_at(ops_status)
-ai_status = build_ai_status_summary(
-    recommend=recommend_bundle,
-    battle=battle_bundle,
-    learning=learning_bundle,
-    ml=ml_bundle,
-    validation=validation_bundle,
-    quality=quality_bundle,
-)
-today_todos = build_today_todos(
-    status=status,
-    recommend=recommend_bundle,
-    battle=battle_bundle,
-    market=market_bundle,
-    pnl=pnl_bundle,
-    validation=validation_bundle,
-    quality=quality_bundle,
-    ops=ops_status,
-)
-data_progress = get_data_progress_bundle(
-    total_races=status["races"],
-    valid_races=quality_bundle.get("valid_races", 0),
-    result_races=status["results"],
-)
+with safe_page("メイン初期化"):
+    if "ops_scheduler_started" not in st.session_state:
+        st.session_state.ops_scheduler_started = True
+        start_scheduler_thread(bet_type)
+
+    last_updated = get_last_updated_at(ops_status)
+    ai_status = build_ai_status_summary(
+        recommend=recommend_bundle,
+        battle=battle_bundle,
+        learning=learning_bundle,
+        ml=ml_bundle,
+        validation=validation_bundle,
+        quality=quality_bundle,
+    )
+    today_todos = build_today_todos(
+        status=status,
+        recommend=recommend_bundle,
+        battle=battle_bundle,
+        market=market_bundle,
+        pnl=pnl_bundle,
+        validation=validation_bundle,
+        quality=quality_bundle,
+        ops=ops_status,
+    )
+    data_progress = get_data_progress_bundle(
+        total_races=status["races"],
+        valid_races=quality_bundle.get("valid_races", 0),
+        result_races=status["results"],
+    )
 
 (
     tab_home,
@@ -774,7 +790,7 @@ with tab_settings:
         ["⚙ 自動運用", "🔔 通知", "分析", "異常検知", "レポート", "使い方"]
     )
 
-with tab_home:
+with tab_home, safe_page("ホーム"):
     st.subheader("ホーム")
     st.caption("毎日の運用ダッシュボード — ここだけ見れば今日の判断ができます")
 
@@ -911,7 +927,7 @@ with tab_home:
         )
         st.caption("※ 判断補助ツールです。自動購入ではありません。")
 
-with tab_rec:
+with tab_rec, safe_page("今日のAIおすすめ"):
     st.subheader("今日のAIおすすめ")
     if recommend_bundle.get("has_data"):
         rec = recommend_bundle
@@ -935,7 +951,7 @@ with tab_rec:
     with st.expander("テキストレポート"):
         st.text(lines_to_text(recommend_bundle.get("lines", [])))
 
-with tab_battle:
+with tab_battle, safe_page("実戦判定"):
     st.subheader("実戦判定")
     st.caption("AIスコア・学習・市場・ライン・直前・品質を総合した買い/見送り判定です。")
 
@@ -1059,7 +1075,7 @@ with tab_battle:
             """
         )
 
-with tab_bankroll:
+with tab_bankroll, safe_page("資金管理"):
     st.subheader("資金管理")
     st.caption(f"元手{DEFAULT_BANKROLL:,}円から始める前提で、AI判定に応じた購入金額を提案します。")
 
@@ -1227,7 +1243,7 @@ with tab_bankroll:
             """
         )
 
-with tab_validation:
+with tab_validation, safe_page("検証レポート"):
     st.subheader("検証レポート")
     st.caption("AIおすすめ・実戦判定・資金管理の成績を日次/週次/月次で自動検証します。")
 
@@ -1353,7 +1369,7 @@ with tab_validation:
             """
         )
 
-with tab_improve:
+with tab_improve, safe_page("改善提案"):
     st.subheader("改善提案AI")
     st.caption("検証レポートをもとに、弱い条件・強い条件・次の改善案を自動抽出します。")
 
@@ -1463,7 +1479,7 @@ with tab_improve:
     with st.expander("テキストレポート"):
         st.text(lines_to_text(ib.get("lines", [])))
 
-with t_notify:
+with t_notify, safe_page("通知"):
     st.subheader("通知")
     st.caption("AI高スコア・危険人気・直前急変を通知ログに記録します（LINE連携前）。")
 
@@ -1563,13 +1579,13 @@ with t_notify:
     with st.expander("テキストレポート"):
         st.text(lines_to_text(build_notify_lines(bet_type)))
 
-with t_analyze:
+with t_analyze, safe_page("分析"):
     st.subheader("市場偏り分析")
     if "分析対象がありません" in analyze_text:
         st.warning("データがありません。左の「workflow 実行」を押してください。")
     st.text(analyze_text)
 
-with t_ai:
+with t_ai, safe_page("AI指標"):
     st.subheader("AI予測強化指標")
     overall = ai_bundle["overall"]
     metrics_df = ai_bundle["metrics"]
@@ -1633,7 +1649,7 @@ with t_ai:
 
         st.text(lines_to_text(ai_bundle["lines"]))
 
-with t_ml:
+with t_ml, safe_page("ML予測"):
     st.subheader("予測AI（XGBoost）")
     st.caption("過去データから回収率・期待値を機械学習で予測します。")
 
@@ -1775,7 +1791,7 @@ with t_ml:
         with st.expander("テキストレポート"):
             st.text(lines_to_text(build_ml_lines(bet_type)))
 
-with t_learn:
+with t_learn, safe_page("パターン学習"):
     st.subheader("学習状況")
     st.caption("過去結果から勝ちパターンを学習し、AIスコアへ加点/減点します。")
 
@@ -1899,7 +1915,7 @@ with t_learn:
         with st.expander("テキストレポート"):
             st.text(lines_to_text(build_learning_lines(bet_type)))
 
-with t_advanced:
+with t_advanced, safe_page("本格学習"):
     st.subheader("本格学習")
     st.caption("データ品質チェック済みの有効レースのみで学習し、AIスコア重みを自動調整します。")
 
@@ -2021,7 +2037,7 @@ with t_advanced:
             """
         )
 
-with t_ops:
+with t_ops, safe_page("自動運用"):
     st.subheader("運用状況（自動運用モード）")
     st.caption("毎朝6時に自動実行 · 取得 → 分析 → 学習 → レポート → AIおすすめ → 通知")
 
@@ -2135,7 +2151,7 @@ python main.py ops --daemon
             """
         )
 
-with t_collect:
+with t_collect, safe_page("100レース収集"):
     st.subheader("データ収集（100レースモード）")
     st.caption("複数日・複数開催をまとめて取得し、学習・レポートを自動更新します。")
 
@@ -2269,7 +2285,7 @@ with t_collect:
             """
         )
 
-with t_quality:
+with t_quality, safe_page("データ品質"):
     st.subheader("データ品質")
     st.caption("保存済みレースの整合性を確認し、学習に使えるデータを判定します。")
 
@@ -2363,7 +2379,7 @@ with t_quality:
             """
         )
 
-with tab_pnl:
+with tab_pnl, safe_page("収支検証"):
     st.subheader("収支検証")
     st.caption("AIおすすめの購入記録と、買わなかった候補の仮想成績を検証します。")
 
@@ -2496,7 +2512,7 @@ with tab_pnl:
     with st.expander("テキストレポート"):
         st.text(lines_to_text(build_pnl_lines(bet_type)))
 
-with tab_line:
+with tab_line, safe_page("ライン分析"):
     st.subheader("ライン分析")
     st.caption("並び予想API・出走表からライン特徴量を算出（判断補助）")
 
@@ -2597,7 +2613,7 @@ with tab_line:
                 """
             )
 
-with t_chart:
+with t_chart, safe_page("グラフ"):
     st.subheader("グラフ（Plotly）")
     if not charts_bundle["has_data"]:
         st.warning(
@@ -2613,15 +2629,46 @@ with t_chart:
             step=5,
         )
         if min_score != charts_bundle["min_score"]:
-            charts_bundle = get_charts_bundle(bet_type, min_score=min_score)
+            refreshed = safe_call(
+                "グラフ再生成",
+                get_charts_bundle,
+                bet_type,
+                min_score=min_score,
+            )
+            if refreshed:
+                charts_bundle = refreshed
 
-        st.plotly_chart(charts_bundle["fig_recovery_trend"], use_container_width=True, key="charts_fig_recovery_trend")
-        st.plotly_chart(charts_bundle["fig_hit_rate"], use_container_width=True, key="charts_fig_hit_rate")
+        safe_plotly_chart(
+            charts_bundle["fig_recovery_trend"],
+            key="charts_fig_recovery_trend",
+            label="回収率推移",
+        )
+        safe_plotly_chart(
+            charts_bundle["fig_hit_rate"],
+            key="charts_fig_hit_rate",
+            label="的中率推移",
+        )
         if not charts_bundle["by_date"].empty and len(charts_bundle["by_date"]) > 1:
-            st.plotly_chart(charts_bundle["fig_recovery_by_date"], use_container_width=True, key="charts_fig_recovery_by_date")
-        st.plotly_chart(charts_bundle["fig_venue_ranking"], use_container_width=True, key="charts_fig_venue_ranking")
-        st.plotly_chart(charts_bundle["fig_ai_distribution"], use_container_width=True, key="charts_fig_ai_distribution")
-        st.plotly_chart(charts_bundle["fig_score_scatter"], use_container_width=True, key="charts_fig_score_scatter")
+            safe_plotly_chart(
+                charts_bundle["fig_recovery_by_date"],
+                key="charts_fig_recovery_by_date",
+                label="開催日別回収率",
+            )
+        safe_plotly_chart(
+            charts_bundle["fig_venue_ranking"],
+            key="charts_fig_venue_ranking",
+            label="競輪場別回収率",
+        )
+        safe_plotly_chart(
+            charts_bundle["fig_ai_distribution"],
+            key="charts_fig_ai_distribution",
+            label="AIスコア分布",
+        )
+        safe_plotly_chart(
+            charts_bundle["fig_score_scatter"],
+            key="charts_fig_score_scatter",
+            label="スコア×回収率",
+        )
 
         st.markdown(f"##### 高スコアレース（≥ {min_score}）")
         high_df = charts_bundle["high_score_races"]
@@ -2630,7 +2677,7 @@ with t_chart:
         else:
             st.dataframe(high_df, use_container_width=True, hide_index=True)
 
-with tab_market:
+with tab_market, safe_page("市場監視"):
     st.subheader("市場監視（直前の市場変化）")
     st.caption("判断補助ツールです。オッズを2回以上取得すると急変検知が有効になります。")
 
@@ -2782,7 +2829,7 @@ with tab_market:
                 """
             )
 
-with t_prerace:
+with t_prerace, safe_page("直前分析"):
     st.subheader("直前分析（発走前モード）")
     st.caption(
         "発走30分前・10分前・直前のオッズを記録し、期待値の変化を検知します。"
@@ -2972,7 +3019,7 @@ with t_prerace:
         with st.expander("テキストレポート"):
             st.text(lines_to_text(build_pre_race_lines(bet_type)))
 
-with t_detect:
+with t_detect, safe_page("異常検知"):
     st.subheader("異常・オッズ歪み検知")
     if detect_df.empty:
         st.info("異常は検出されませんでした。")
@@ -2981,7 +3028,7 @@ with t_detect:
         st.dataframe(detect_df, use_container_width=True, hide_index=True)
         st.text(lines_to_text(build_detect_lines(bet_type)))
 
-with t_report:
+with t_report, safe_page("レポート"):
     st.subheader("report_latest.txt")
     st.caption(str(REPORT_LATEST))
     report_body = load_report_latest()
@@ -2994,7 +3041,7 @@ with t_report:
             mime="text/plain",
         )
 
-with tab_backup:
+with tab_backup, safe_page("バックアップ"):
     st.subheader("バックアップ")
     st.caption("DB・設定・レポートをまとめて保存し、必要なときに復元できます。")
 
@@ -3085,7 +3132,7 @@ with tab_backup:
     with st.expander("テキストレポート"):
         st.text(lines_to_text(build_backup_lines()))
 
-with tab_check:
+with tab_check, safe_page("システムチェック"):
     st.subheader("システムチェック")
     st.caption("DB・取得・分析・AI・学習・レポート・バックアップを一括確認します。")
 
@@ -3163,7 +3210,7 @@ with tab_check:
     with st.expander("テキストレポート"):
         st.text(lines_to_text(sc.get("lines", [])))
 
-with t_help:
+with t_help, safe_page("使い方"):
     st.markdown(
         """
 ### メニュー構成（14タブ）
