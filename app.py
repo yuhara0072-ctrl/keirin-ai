@@ -402,11 +402,6 @@ def run_workflow(
         log.append("STEP 2-4/4: 分析・検知・レポート保存...")
         path = save_report(bet_type=bet_type)
         log.append(f"  → 保存: {path}")
-
-        from github_persist import workflow_persist_and_sync
-
-        _, persist_lines = workflow_persist_and_sync("workflow")
-        log.extend(persist_lines)
         return True, "\n".join(log)
     except Exception as e:
         log.append(f"エラー: {e}")
@@ -610,6 +605,7 @@ with st.sidebar:
 
 if run_btn:
     venue = venue_code.strip() or None
+    persist_lines: list[str] = []
     with st.spinner("workflow 実行中（数分かかります）..."):
         success, log_text = run_workflow(
             kaisai_date=kaisai_date,
@@ -618,13 +614,27 @@ if run_btn:
             venue_code=venue,
             bet_type=bet_type,
         )
+    print("[workflow] fetch/report 完了 — GitHub永続化を開始", flush=True)
+    try:
+        from github_persist import execute_workflow_persist_with_print
+
+        _, persist_lines = execute_workflow_persist_with_print("workflow")
+    except Exception as exc:
+        print(f"[github_persist] FATAL: {exc}", flush=True)
+        persist_lines = [f"永続化エラー: {exc}"]
+
+    combined_log = log_text
+    if persist_lines:
+        combined_log = f"{log_text}\n" + "\n".join(
+            f"  {line}" if not line.startswith("---") else line for line in persist_lines
+        )
+
     if success:
         st.success("workflow が完了しました")
     else:
         st.error("workflow でエラーが発生しました")
     with st.expander("実行ログ", expanded=True):
-        st.text(log_text)
-    st.rerun()
+        st.text(combined_log)
 
 _check_deep = st.session_state.pop("system_check_deep", False)
 _bundles, _bundle_error = load_app_bundles_safe(bet_type, deep_check=_check_deep)

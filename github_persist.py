@@ -430,6 +430,8 @@ def sync_to_github(
     reason: str = "update",
     *,
     log_fn: Optional[Callable[[str], None]] = None,
+    races: Optional[list[dict]] = None,
+    results: Optional[list[dict]] = None,
 ) -> dict:
     push_log: list[str] = []
     db_races_before = _db_race_count()
@@ -439,17 +441,18 @@ def sync_to_github(
         f"DB件数: races={db_races_before} results={db_results_before} path={DB_PATH}",
     )
 
-    _emit_log(log_fn, "persist_races() 呼び出し")
-    races = persist_races()
-    _emit_log(log_fn, f"persist_races() 完了: export={len(races)} 件")
+    if races is None:
+        _emit_log(log_fn, "persist_races() 呼び出し")
+        races = persist_races()
+        _emit_log(log_fn, f"persist_races() 完了: export={len(races)} 件")
+    if results is None:
+        _emit_log(log_fn, "persist_results() 呼び出し")
+        results = persist_results()
+        _emit_log(log_fn, f"persist_results() 完了: export={len(results)} 件")
 
-    _emit_log(log_fn, "persist_results() 呼び出し")
-    results = persist_results()
-    _emit_log(log_fn, f"persist_results() 完了: export={len(results)} 件")
-
-    files = build_snapshot_files(races, results)
     exported_races = len(races)
     exported_results = len(results)
+    files = build_snapshot_files(races, results)
     _emit_log(
         log_fn,
         f"export件数: races={exported_races} results={exported_results} "
@@ -576,29 +579,55 @@ def format_workflow_persist_detail(result: dict) -> list[str]:
     ]
 
 
-def workflow_persist_and_sync(reason: str = "workflow") -> tuple[dict, list[str]]:
-    """workflow 終了時: persist_races / persist_results を明示実行して GitHub 同期"""
-    lines: list[str] = []
+def _put_result_label(put: dict) -> str:
+    if put.get("skipped"):
+        return "スキップ"
+    if put.get("ok"):
+        return "OK"
+    return "失敗"
 
-    def log_fn(msg: str) -> None:
-        lines.append(f"  {msg}")
 
-    lines.append("STEP 5/5: GitHub永続化")
-    lines.append(f"  GITHUB_REPO={GITHUB_REPO or '(未設定)'}")
-    lines.append(f"  GITHUB_TOKEN={'設定済' if GITHUB_TOKEN else '未設定'}")
-    lines.append(f"  GITHUB_BRANCH={GITHUB_PERSIST_BRANCH}")
+def execute_workflow_persist_with_print(reason: str = "workflow") -> tuple[dict, list[str]]:
+    """workflow ボタン直後: persist + GitHub sync。Render Logs 向けに print 出力"""
+    ui_lines: list[str] = []
 
-    result: dict
+    def log_print(msg: str) -> None:
+        print(f"[github_persist] {msg}", flush=True)
+        logger.info(msg)
+        ui_lines.append(msg)
+
+    log_print("=== workflow persist start ===")
+
+    db_races = _db_race_count()
+    log_print(f"DB race件数: {db_races}")
+
+    log_print("persist_races() 呼び出し")
+    races = persist_races()
+    export_races = len(races)
+    log_print(f"export race件数: {export_races}")
+
+    log_print("persist_results() 呼び出し")
+    results = persist_results()
+    log_print(f"export result件数: {len(results)}")
+
+    log_print(f"GITHUB_REPO: {GITHUB_REPO or '(未設定)'}")
+
     try:
-        result = sync_to_github(reason, log_fn=log_fn)
+        sync_result = sync_to_github(
+            reason,
+            log_fn=log_print,
+            races=races,
+            results=results,
+        )
     except Exception as exc:
-        result = {
+        log_print(f"GitHub sync exception: {exc}")
+        sync_result = {
             "ok": False,
             "github": False,
             "message": str(exc),
             "db_path": str(DB_PATH),
-            "db_race_count": _db_race_count(),
-            "race_count": 0,
+            "db_race_count": db_races,
+            "race_count": export_races,
             "github_repo": GITHUB_REPO,
             "push_log": [],
             "races_json_put": {
@@ -609,10 +638,28 @@ def workflow_persist_and_sync(reason: str = "workflow") -> tuple[dict, list[str]
                 "skipped": False,
             },
         }
-        lines.append(f"  永続化エラー: {exc}")
 
-    lines.extend(format_workflow_persist_detail(result))
-    return result, lines
+    put = sync_result.get("races_json_put") or {}
+    status_code = put.get("status_code")
+    put_label = _put_result_label(put)
+
+    log_print(f"DB race件数: {sync_result.get('db_race_count', db_races)}")
+    log_print(f"export race件数: {sync_result.get('race_count', export_races)}")
+    log_print(f"GITHUB_REPO: {sync_result.get('github_repo') or GITHUB_REPO or '(未設定)'}")
+    log_print(f"GitHub PUT結果: {put_label}")
+    log_print(f"HTTPステータス: {status_code if status_code is not None else 'N/A'}")
+    err = put.get("error_message") or sync_result.get("message") or ""
+    if err:
+        log_print(f"エラーメッセージ: {err}")
+
+    log_print("=== workflow persist end ===")
+    ui_lines.extend(format_workflow_persist_detail(sync_result))
+    return sync_result, ui_lines
+
+
+def workflow_persist_and_sync(reason: str = "workflow") -> tuple[dict, list[str]]:
+    """後方互換 — workflow ボタンからは execute_workflow_persist_with_print を使用"""
+    return execute_workflow_persist_with_print(reason)
 
 
 def restore_if_needed() -> Optional[dict]:
