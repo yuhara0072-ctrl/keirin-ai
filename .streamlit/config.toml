@@ -1,0 +1,11 @@
+# ローカル / Render 共通（ポートは起動コマンドの --server.port を優先）
+
+[server]
+headless = true
+address = "0.0.0.0"
+enableCORS = false
+enableXsrfProtection = true
+
+[browser]
+gatherUsageStats = false
+serverAddress = "0.0.0.0"

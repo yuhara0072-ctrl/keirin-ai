@@ -1,9 +1,10 @@
-# 競輪観測AI — 最小依存（環境構築用）
-# Python 3.11 以上を推奨
+# 競輪観測AI — Python 3.11+（Render / ローカル共通）
+# Render: runtime.txt で 3.12.8 を指定
 
 requests>=2.31.0
 beautifulsoup4>=4.12.0
 lxml>=5.0.0
+numpy>=1.26.0
 pandas>=2.2.0
 plotly>=5.18.0
 streamlit>=1.32.0

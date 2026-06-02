@@ -70,6 +70,102 @@ streamlit run app.py
 
 ブラウザが開きます（`http://localhost:8501`）。**スマホ**から同じURLにアクセスするか、PCのブラウザ幅を狭めて確認できます。
 
+## Web公開（Render）
+
+Streamlit Cloud の代わりに [Render](https://render.com/) で公開できます。**スマホのブラウザから URL を開くだけ**で利用できます（レスポンシブ UI 対応）。
+
+リポジトリには次のファイルが含まれています。
+
+| ファイル | 用途 |
+|---------|------|
+| `render.yaml` | Blueprint（ワンクリックデプロイ） |
+| `Procfile` | 起動コマンド（手動作成時も使用） |
+| `runtime.txt` | Python 3.12.8 |
+| `.streamlit/config.toml` | 本番向け Streamlit 設定 |
+| `requirements.txt` | 依存パッケージ |
+
+### 起動コマンド
+
+Render の **Start Command** / `Procfile` は次のとおりです。
+
+```bash
+streamlit run app.py --server.port $PORT --server.address 0.0.0.0
+```
+
+### 認証（環境変数 / Secrets）
+
+ログインには **ユーザー名・パスワード** が必要です。Render では環境変数で設定します。
+
+| 変数名 | 説明 |
+|--------|------|
+| `KEIRIN_AUTH_USERNAME` | ログイン用ユーザー名 |
+| `KEIRIN_AUTH_PASSWORD` | ログイン用パスワード |
+
+**Render での設定手順**
+
+1. Dashboard → 対象 Web Service → **Environment**
+2. **Add Environment Variable** で上記2つを追加（値は任意の安全な文字列）
+3. **Save Changes** → 自動で再デプロイされます
+
+**ローカル開発（Secrets ファイル）**
+
+`.streamlit/secrets.toml.example` をコピーして `.streamlit/secrets.toml` を作成します（git には含めません）。
+
+```toml
+[auth]
+username = "your_username"
+password = "your_password"
+```
+
+**ローカル開発（環境変数）**
+
+```powershell
+$env:KEIRIN_AUTH_USERNAME="your_username"
+$env:KEIRIN_AUTH_PASSWORD="your_password"
+streamlit run app.py
+```
+
+認証成功後のみアプリ（ホーム含む）が表示されます。未設定の場合はログイン画面のみ表示されます。
+
+### 手順 A: Blueprint（推奨）
+
+1. GitHub にこのリポジトリを push する
+2. [Render Dashboard](https://dashboard.render.com/) → **New** → **Blueprint**
+3. リポジトリを選択 → `render.yaml` を読み込んで **Apply**
+4. サービス設定で **Environment** を開き、`KEIRIN_AUTH_USERNAME` / `KEIRIN_AUTH_PASSWORD` を設定
+5. デプロイ完了後、表示された URL（例: `https://keirin-ai.onrender.com`）を **スマホのブラウザ** で開く
+6. ログイン → **🏠 ホーム** が表示されれば OK
+
+### 手順 B: Web Service を手動作成
+
+1. Render → **New** → **Web Service** → リポジトリを接続
+2. 設定例
+
+| 項目 | 値 |
+|------|-----|
+| Runtime | Python 3 |
+| Build Command | `pip install --upgrade pip && pip install -r requirements.txt` |
+| Start Command | `streamlit run app.py --server.port $PORT --server.address 0.0.0.0` |
+
+3. **Environment** に `KEIRIN_AUTH_USERNAME` / `KEIRIN_AUTH_PASSWORD` を追加
+4. **Create Web Service** でデプロイ
+
+### Render 利用時の注意
+
+- **無料プラン**は一定時間アクセスがないとスリープします。初回表示に数十秒かかることがあります
+- **SQLite / data/** はコンテナ再起動で消えることがあります。初回は「まだデータがありません」と表示され、**🏠 ホーム → 今日の自動実行** でデータ取得してください
+- ログイン必須です。環境変数未設定のままではログイン画面のみ表示されます
+- 有料の **Persistent Disk** を付けると DB を保持できます（任意）
+
+### ローカルで Render と同じ起動方法を試す
+
+```powershell
+$env:PORT=8501
+$env:KEIRIN_AUTH_USERNAME="your_username"
+$env:KEIRIN_AUTH_PASSWORD="your_password"
+streamlit run app.py --server.port 8501 --server.address 0.0.0.0
+```
+
 ### 画面の使い方（運用モード）
 
 **毎日は 🏠 ホーム だけ見ればOK** です。以下が1画面に集約されています。
@@ -396,6 +492,13 @@ streamlit run app.py
 ```
 keirin_ai/
 ├── app.py               # Streamlit アプリ（画面）
+├── auth.py              # ログイン認証
+├── render.yaml          # Render Blueprint
+├── Procfile             # Render / Heroku 形式の起動定義
+├── runtime.txt          # Python バージョン
+├── .streamlit/
+│   ├── config.toml      # Streamlit 本番設定
+│   └── secrets.toml.example
 ├── main.py              # 入口（コマンドライン）
 ├── fetch_daily.py       # 毎日複数レース取得
 ├── fetch_entries.py     # 出走表

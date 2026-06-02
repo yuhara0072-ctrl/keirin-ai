@@ -1,4 +1,4 @@
-"""Streamlit ログイン認証（Streamlit Cloud Secrets 対応）"""
+"""Streamlit ログイン認証（Render 環境変数 / Secrets 対応）"""
 
 from __future__ import annotations
 
@@ -70,15 +70,14 @@ def render_login_page() -> None:
 
     if not credentials_configured():
         st.error(
-            "認証情報が未設定です。Streamlit Cloud の Secrets または環境変数を設定してください。"
+            "認証情報が未設定です。Render の Environment または環境変数を設定してください。"
         )
-        with st.expander("Streamlit Cloud の設定例"):
+        with st.expander("Render の設定例"):
             st.code(
-                """[auth]
-username = "your_username"
-password = "your_password"
+                """KEIRIN_AUTH_USERNAME=your_username
+KEIRIN_AUTH_PASSWORD=your_password
 """,
-                language="toml",
+                language="bash",
             )
         with st.expander("ローカル開発の設定例"):
             st.code(

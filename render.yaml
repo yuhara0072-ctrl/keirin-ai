@@ -1,0 +1,20 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+# Dashboard → New → Blueprint → このリポジトリを選択
+
+services:
+  - type: web
+    name: keirin-ai
+    runtime: python
+    plan: free
+    region: oregon
+    branch: main
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: streamlit run app.py --server.port $PORT --server.address 0.0.0.0
+    healthCheckPath: /
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.8"
+      - key: KEIRIN_AUTH_USERNAME
+        sync: false
+      - key: KEIRIN_AUTH_PASSWORD
+        sync: false
