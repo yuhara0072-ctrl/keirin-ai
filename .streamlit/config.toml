@@ -4,7 +4,8 @@
 headless = true
 address = "0.0.0.0"
 enableCORS = false
-enableXsrfProtection = true
+# Render 等のリバースプロキシ配下でセッション cookie / rerun が切れるのを防ぐ
+enableXsrfProtection = false
 
 [browser]
 gatherUsageStats = false

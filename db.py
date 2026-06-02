@@ -95,16 +95,46 @@ def get_db_status() -> dict:
         return {"races": 0, "results": 0, "odds": 0, "ready": False}
 
 
-def ensure_db() -> None:
-    """アプリ起動時に DB と全テーブルを idempotent に作成"""
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    init_db()
+def bootstrap_database() -> dict:
+    """DB 作成 + GitHub/ローカル復元。例外は握りつぶし結果 dict で返す"""
+    outcome: dict = {
+        "ok": True,
+        "restore": None,
+        "race_count": 0,
+        "error": None,
+    }
+    try:
+        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        init_db()
+    except Exception as exc:
+        outcome["ok"] = False
+        outcome["error"] = f"init_db: {exc}"
+        return outcome
+
     try:
         from github_persist import restore_if_needed
 
-        restore_if_needed()
-    except Exception:
-        pass
+        outcome["restore"] = restore_if_needed()
+    except Exception as exc:
+        outcome["ok"] = False
+        outcome["error"] = f"restore: {exc}"
+
+    try:
+        conn = get_connection()
+        try:
+            outcome["race_count"] = safe_table_count(conn, "races")
+        finally:
+            conn.close()
+    except Exception as exc:
+        if outcome["error"] is None:
+            outcome["error"] = f"count: {exc}"
+
+    return outcome
+
+
+def ensure_db() -> None:
+    """アプリ起動時に DB と全テーブルを idempotent に作成"""
+    bootstrap_database()
 
 
 @contextmanager

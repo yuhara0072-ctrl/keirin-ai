@@ -10,6 +10,13 @@ import streamlit as st
 
 SESSION_AUTHENTICATED = "authenticated"
 SESSION_USERNAME = "auth_username"
+SESSION_DB_BOOTSTRAPPED = "db_bootstrapped"
+
+
+def init_auth_session() -> None:
+    """セッションキーを初期化（未設定時に False 扱いでログアウトしない）"""
+    st.session_state.setdefault(SESSION_AUTHENTICATED, False)
+    st.session_state.setdefault(SESSION_USERNAME, "")
 
 
 def _load_credentials() -> Optional[tuple[str, str]]:
@@ -59,11 +66,63 @@ def authenticate(username: str, password: str) -> bool:
 
 
 def logout() -> None:
+    """明示的ログアウト時のみ認証を解除"""
     st.session_state[SESSION_AUTHENTICATED] = False
-    st.session_state.pop(SESSION_USERNAME, None)
+    st.session_state[SESSION_USERNAME] = ""
+    st.session_state[SESSION_DB_BOOTSTRAPPED] = False
+    for key in list(st.session_state.keys()):
+        if str(key).startswith("bundles_"):
+            st.session_state.pop(key, None)
 
 
-def render_login_page() -> None:
+def _race_count_safe() -> int:
+    try:
+        from db import get_connection, safe_table_count
+
+        conn = get_connection()
+        try:
+            return safe_table_count(conn, "races")
+        finally:
+            conn.close()
+    except Exception:
+        return 0
+
+
+def run_login_bootstrap() -> dict:
+    """ログイン直後の DB 初期化・GitHub 復元（例外でも認証は維持）"""
+    if st.session_state.get(SESSION_DB_BOOTSTRAPPED):
+        count = _race_count_safe()
+        print("[auth] restore start (already bootstrapped)", flush=True)
+        print("[auth] restore result: skipped", flush=True)
+        print(f"[auth] db race count: {count}", flush=True)
+        return {"ok": True, "restore": None, "race_count": count, "skipped": True}
+
+    print("[auth] restore start", flush=True)
+    outcome: dict = {"ok": True, "restore": None, "race_count": 0, "error": None}
+    try:
+        from db import bootstrap_database
+
+        outcome = bootstrap_database()
+    except Exception as exc:
+        outcome = {"ok": False, "restore": None, "race_count": 0, "error": str(exc)}
+        print(f"[auth] bootstrap error: {exc}", flush=True)
+
+    restore = outcome.get("restore")
+    print(f"[auth] restore result: {restore if restore is not None else 'none'}", flush=True)
+    print(f"[auth] db race count: {outcome.get('race_count', 0)}", flush=True)
+    st.session_state[SESSION_DB_BOOTSTRAPPED] = True
+    return outcome
+
+
+def ensure_db_ready() -> None:
+    """認証済みセッションで DB を一度だけ準備（ログイン以外の再実行用）"""
+    if st.session_state.get(SESSION_DB_BOOTSTRAPPED):
+        return
+    run_login_bootstrap()
+
+
+def render_login_page() -> bool:
+    """ログイン UI。成功したら True（同一実行で require_authentication が通過可能）"""
     st.title("🚴 競輪観測AI")
     st.subheader("ログイン")
     st.caption("認証に成功するとアプリを利用できます。")
@@ -88,7 +147,7 @@ password = "your_password"
 """,
                 language="toml",
             )
-        return
+        return False
 
     with st.form("login_form", clear_on_submit=False):
         username = st.text_input("ユーザー名", autocomplete="username")
@@ -97,19 +156,30 @@ password = "your_password"
         )
         submitted = st.form_submit_button("ログイン", type="primary", use_container_width=True)
 
-    if submitted:
-        if not username.strip() or not password:
-            st.error("ユーザー名とパスワードを入力してください。")
-        elif authenticate(username, password):
-            st.rerun()
-        else:
-            st.error("ユーザー名またはパスワードが正しくありません。")
+    if not submitted:
+        return False
+
+    if not username.strip() or not password:
+        st.error("ユーザー名とパスワードを入力してください。")
+        return False
+
+    if authenticate(username, password):
+        print("[auth] auth success", flush=True)
+        run_login_bootstrap()
+        print(f"[auth] session authenticated: {is_authenticated()}", flush=True)
+        st.success("ログインしました。アプリを読み込んでいます…")
+        return True
+
+    st.error("ユーザー名またはパスワードが正しくありません。")
+    return False
 
 
 def require_authentication() -> bool:
+    init_auth_session()
     if is_authenticated():
         return True
-    render_login_page()
+    if render_login_page():
+        return is_authenticated()
     return False
 
 
