@@ -378,7 +378,7 @@ def build_validation_report(
     if sync_virtual:
         sync_battle_virtual_bets(battle_bundle, bankroll_plan, bet_type)
 
-    from bet_tracker import load_bet_records, settle_pending_bets
+    from bet_tracker import _summarize, load_bet_records, settle_pending_bets
 
     settle_pending_bets(bet_type)
     actual = load_bet_records(bet_type, is_virtual=0)
