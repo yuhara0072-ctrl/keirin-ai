@@ -32,13 +32,15 @@ SCORE_STAKES = [
     (0, 0),
 ]
 
-BANKROLL_TABLE = """
+BANKROLL_CONFIG_DDL = """
 CREATE TABLE IF NOT EXISTS bankroll_config (
-    key         TEXT PRIMARY KEY,
+    config_key  TEXT PRIMARY KEY,
     value       TEXT NOT NULL,
     updated_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
-);
+)
+"""
 
+BANKROLL_SNAPSHOTS_DDL = """
 CREATE TABLE IF NOT EXISTS bankroll_snapshots (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     snapshot_date   TEXT NOT NULL,
@@ -46,9 +48,51 @@ CREATE TABLE IF NOT EXISTS bankroll_snapshots (
     daily_used      INTEGER NOT NULL DEFAULT 0,
     note            TEXT,
     created_at      TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
-);
-CREATE INDEX IF NOT EXISTS idx_bankroll_snap_date ON bankroll_snapshots(snapshot_date);
+)
 """
+
+BANKROLL_SNAPSHOTS_INDEX = (
+    "CREATE INDEX IF NOT EXISTS idx_bankroll_snap_date "
+    "ON bankroll_snapshots(snapshot_date)"
+)
+
+
+def _bankroll_config_columns(conn) -> set[str]:
+    from db import table_exists
+
+    if not table_exists(conn, "bankroll_config"):
+        return set()
+    return {str(row[1]) for row in conn.execute("PRAGMA table_info(bankroll_config)")}
+
+
+def _upgrade_bankroll_config_schema(conn) -> None:
+    """旧スキーマ (key 列) を config_key へ移行"""
+    cols = _bankroll_config_columns(conn)
+    if not cols or "config_key" in cols or "key" not in cols:
+        return
+    try:
+        conn.execute('ALTER TABLE bankroll_config RENAME COLUMN "key" TO config_key')
+        return
+    except Exception:
+        pass
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS bankroll_config_new (
+            config_key  TEXT PRIMARY KEY,
+            value       TEXT NOT NULL,
+            updated_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO bankroll_config_new (config_key, value, updated_at)
+        SELECT "key", value, updated_at FROM bankroll_config
+        """
+    )
+    conn.execute("DROP TABLE bankroll_config")
+    conn.execute("ALTER TABLE bankroll_config_new RENAME TO bankroll_config")
+
 
 DEFAULT_CONFIG = {
     "initial_bankroll": str(DEFAULT_INITIAL_BANKROLL),
@@ -60,20 +104,24 @@ DEFAULT_CONFIG = {
 
 
 def migrate_bankroll_table(conn) -> None:
-    conn.executescript(BANKROLL_TABLE)
-    for key, value in DEFAULT_CONFIG.items():
+    conn.execute(BANKROLL_CONFIG_DDL)
+    conn.execute(BANKROLL_SNAPSHOTS_DDL)
+    conn.execute(BANKROLL_SNAPSHOTS_INDEX)
+    _upgrade_bankroll_config_schema(conn)
+    for config_key, config_value in DEFAULT_CONFIG.items():
         conn.execute(
             """
-            INSERT OR IGNORE INTO bankroll_config (key, value) VALUES (?, ?)
+            INSERT OR IGNORE INTO bankroll_config (config_key, value)
+            VALUES (?, ?)
             """,
-            (key, value),
+            (config_key, config_value),
         )
 
 
 def get_bankroll_config() -> dict[str, str]:
     conn = get_connection()
     migrate_bankroll_table(conn)
-    rows = conn.execute("SELECT key, value FROM bankroll_config").fetchall()
+    rows = conn.execute("SELECT config_key, value FROM bankroll_config").fetchall()
     conn.close()
     cfg = dict(DEFAULT_CONFIG)
     cfg.update({str(r[0]): str(r[1]) for r in rows})
@@ -85,9 +133,9 @@ def set_bankroll_config(key: str, value: str) -> None:
         migrate_bankroll_table(conn)
         conn.execute(
             """
-            INSERT INTO bankroll_config (key, value, updated_at)
+            INSERT INTO bankroll_config (config_key, value, updated_at)
             VALUES (?, ?, datetime('now', 'localtime'))
-            ON CONFLICT(key) DO UPDATE SET
+            ON CONFLICT(config_key) DO UPDATE SET
                 value = excluded.value,
                 updated_at = excluded.updated_at
             """,
