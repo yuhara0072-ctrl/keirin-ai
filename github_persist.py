@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import base64
 import json
-import os
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -16,13 +16,27 @@ from typing import Any, Optional
 import pandas as pd
 import requests
 
-from config import GITHUB_PERSIST_BRANCH, GITHUB_REPO, GITHUB_TOKEN, PERSIST_DIR, REQUEST_TIMEOUT
+from config import (
+    DB_PATH,
+    GITHUB_PERSIST_BRANCH,
+    GITHUB_REPO,
+    GITHUB_REQUEST_TIMEOUT,
+    GITHUB_TOKEN,
+    PERSIST_DIR,
+)
 
 PERSIST_VERSION = 1
 MAX_CHUNK_BYTES = 900_000
 TABLES_CORE = ("races", "entries", "odds", "results")
 TABLES_ALL = (*TABLES_CORE, "learned_patterns")
 ODDS_CHUNK_PREFIX = "odds_"
+CORE_FILE_ORDER = (
+    "meta.json",
+    "races.json",
+    "entries.json",
+    "results.json",
+    "learned_patterns.json",
+)
 
 
 def is_github_enabled() -> bool:
@@ -34,8 +48,9 @@ def is_persist_enabled() -> bool:
 
 
 def _api_headers() -> dict[str, str]:
+    token = GITHUB_TOKEN.strip()
     return {
-        "Authorization": f"Bearer {GITHUB_TOKEN.strip()}",
+        "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
     }
@@ -55,6 +70,79 @@ def _write_json_file(path: Path, payload: Any) -> None:
         json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
         encoding="utf-8",
     )
+
+
+def _flush_db() -> None:
+    """export 前に SQLite の変更を確実に反映"""
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _rows_to_records(rows) -> list[dict]:
+    return [dict(row) for row in rows]
+
+
+def persist_races() -> list[dict]:
+    """DB から races テーブルを読み出し（GitHub 保存用）"""
+    from db import get_connection, table_exists
+
+    _flush_db()
+    conn = get_connection()
+    try:
+        if not table_exists(conn, "races"):
+            return []
+        rows = conn.execute("SELECT * FROM races ORDER BY race_id").fetchall()
+        return _rows_to_records(rows)
+    finally:
+        conn.close()
+
+
+def persist_results() -> list[dict]:
+    """DB から results テーブルを読み出し（GitHub 保存用）"""
+    from db import get_connection, table_exists
+
+    _flush_db()
+    conn = get_connection()
+    try:
+        if not table_exists(conn, "results"):
+            return []
+        rows = conn.execute("SELECT * FROM results ORDER BY race_id").fetchall()
+        return _rows_to_records(rows)
+    finally:
+        conn.close()
+
+
+def _persist_entries() -> list[dict]:
+    from db import get_connection, table_exists
+
+    conn = get_connection()
+    try:
+        if not table_exists(conn, "entries"):
+            return []
+        rows = conn.execute("SELECT * FROM entries ORDER BY race_id, bracket").fetchall()
+        return _rows_to_records(rows)
+    finally:
+        conn.close()
+
+
+def _persist_learned_patterns() -> list[dict]:
+    from db import get_connection, table_exists
+
+    conn = get_connection()
+    try:
+        if not table_exists(conn, "learned_patterns"):
+            return []
+        rows = conn.execute(
+            "SELECT * FROM learned_patterns ORDER BY bet_type, category, condition_key"
+        ).fetchall()
+        return _rows_to_records(rows)
+    finally:
+        conn.close()
 
 
 def _table_records(conn, table: str) -> list[dict]:
@@ -91,52 +179,57 @@ def _export_odds_chunks(conn) -> dict[str, list[dict]]:
     return chunks
 
 
+def _db_race_count() -> int:
+    from db import get_connection, safe_table_count, table_exists
+
+    conn = get_connection()
+    try:
+        if not table_exists(conn, "races"):
+            return 0
+        return safe_table_count(conn, "races")
+    finally:
+        conn.close()
+
+
 def export_snapshot() -> dict[str, Any]:
+    races = persist_races()
+    results = persist_results()
+    entries = _persist_entries()
+    patterns = _persist_learned_patterns()
+
+    meta = {
+        "version": PERSIST_VERSION,
+        "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "db_path": str(DB_PATH),
+        "race_count": len(races),
+        "result_count": len(results),
+        "learning_count": len(patterns),
+    }
+
+    files: dict[str, Any] = {
+        "meta.json": meta,
+        "races.json": races,
+        "entries.json": entries,
+        "results.json": results,
+        "learned_patterns.json": patterns,
+    }
+
     from db import get_connection, table_exists
 
     conn = get_connection()
     try:
-        meta = {
-            "version": PERSIST_VERSION,
-            "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "race_count": 0,
-            "result_count": 0,
-            "learning_count": 0,
-        }
-        files: dict[str, Any] = {"meta.json": meta}
-
-        if table_exists(conn, "races"):
-            races = _table_records(conn, "races")
-            files["races.json"] = races
-            meta["race_count"] = len(races)
-        else:
-            files["races.json"] = []
-
-        if table_exists(conn, "entries"):
-            files["entries.json"] = _table_records(conn, "entries")
-        else:
-            files["entries.json"] = []
-
-        if table_exists(conn, "results"):
-            results = _table_records(conn, "results")
-            files["results.json"] = results
-            meta["result_count"] = len(results)
-        else:
-            files["results.json"] = []
-
         if table_exists(conn, "odds"):
             files.update(_export_odds_chunks(conn))
-        if table_exists(conn, "learned_patterns"):
-            patterns = _table_records(conn, "learned_patterns")
-            files["learned_patterns.json"] = patterns
-            meta["learning_count"] = len(patterns)
-        else:
-            files["learned_patterns.json"] = []
-
-        files["meta.json"] = meta
-        return files
     finally:
         conn.close()
+
+    db_count = _db_race_count()
+    if db_count > 0 and len(races) == 0:
+        raise RuntimeError(
+            f"export mismatch: DB has {db_count} races at {DB_PATH} but persist_races() returned 0"
+        )
+
+    return files
 
 
 def _import_table(conn, table: str, records: list[dict]) -> None:
@@ -207,8 +300,7 @@ def load_local_snapshot() -> Optional[dict[str, Any]]:
             continue
         files[path.name] = _read_json_file(path)
     races = files.get("races.json") or []
-    patterns = files.get("learned_patterns.json") or []
-    if not races and not patterns:
+    if not races:
         return None
     return files
 
@@ -219,7 +311,7 @@ def _github_get_file(name: str) -> tuple[Optional[str], Optional[str]]:
         url,
         headers=_api_headers(),
         params={"ref": GITHUB_PERSIST_BRANCH},
-        timeout=REQUEST_TIMEOUT,
+        timeout=GITHUB_REQUEST_TIMEOUT,
     )
     if resp.status_code == 404:
         return None, None
@@ -239,8 +331,26 @@ def _github_put_file(name: str, content: str, message: str) -> None:
     }
     if sha:
         payload["sha"] = sha
-    resp = requests.put(url, headers=_api_headers(), json=payload, timeout=REQUEST_TIMEOUT)
-    resp.raise_for_status()
+    resp = requests.put(
+        url,
+        headers=_api_headers(),
+        json=payload,
+        timeout=GITHUB_REQUEST_TIMEOUT,
+    )
+    if resp.status_code >= 400:
+        detail = resp.text[:500]
+        raise RuntimeError(f"GitHub PUT {name} failed ({resp.status_code}): {detail}")
+
+
+def _ordered_file_names(files: dict[str, Any]) -> list[str]:
+    ordered: list[str] = []
+    for name in CORE_FILE_ORDER:
+        if name in files:
+            ordered.append(name)
+    for name in sorted(files.keys()):
+        if name not in ordered:
+            ordered.append(name)
+    return ordered
 
 
 def download_github_snapshot() -> Optional[dict[str, Any]]:
@@ -255,7 +365,7 @@ def download_github_snapshot() -> Optional[dict[str, Any]]:
         list_url,
         headers=_api_headers(),
         params={"ref": GITHUB_PERSIST_BRANCH},
-        timeout=REQUEST_TIMEOUT,
+        timeout=GITHUB_REQUEST_TIMEOUT,
     )
     if resp.status_code == 404:
         return files if files.get("meta.json") else None
@@ -273,30 +383,49 @@ def download_github_snapshot() -> Optional[dict[str, Any]]:
 
 
 def sync_to_github(reason: str = "update") -> dict:
+    db_races_before = _db_race_count()
     files = export_snapshot()
+    exported_races = len(files.get("races.json") or [])
     save_local_snapshot(files)
     result = {
         "ok": True,
         "local": True,
         "github": False,
-        "race_count": files["meta.json"]["race_count"],
-        "learning_count": files["meta.json"]["learning_count"],
+        "db_race_count": db_races_before,
+        "race_count": exported_races,
+        "result_count": len(files.get("results.json") or []),
+        "learning_count": len(files.get("learned_patterns.json") or []),
+        "db_path": str(DB_PATH),
         "message": "",
+        "errors": [],
     }
+
     if not is_github_enabled():
         result["message"] = "local only (GITHUB_TOKEN / GITHUB_REPO 未設定)"
         return result
 
+    if db_races_before > 0 and exported_races == 0:
+        result["ok"] = False
+        result["message"] = (
+            f"GitHub同期を中止: DB={db_races_before}件 なのに export=0件 ({DB_PATH})"
+        )
+        return result
+
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     commit_msg = f"chore: persist keirin data ({reason}) at {stamp}"
+    pushed: list[str] = []
     try:
-        for name, content in files.items():
-            text = json.dumps(content, ensure_ascii=False, separators=(",", ":"))
+        for name in _ordered_file_names(files):
+            text = json.dumps(files[name], ensure_ascii=False, separators=(",", ":"))
             _github_put_file(name, text, commit_msg)
+            pushed.append(name)
         result["github"] = True
-        result["message"] = f"github synced ({result['race_count']} races)"
+        result["message"] = (
+            f"github synced ({exported_races} races, {result['result_count']} results)"
+        )
     except Exception as exc:
         result["ok"] = False
+        result["errors"] = pushed
         result["message"] = str(exc)
     return result
 
@@ -327,8 +456,7 @@ def restore_if_needed() -> Optional[dict]:
         return None
 
     races = snapshot.get("races.json") or []
-    patterns = snapshot.get("learned_patterns.json") or []
-    if not races and not patterns:
+    if not races:
         return None
 
     stats = import_snapshot(snapshot)
@@ -342,4 +470,21 @@ def maybe_sync(reason: str) -> dict:
     try:
         return sync_to_github(reason)
     except Exception as exc:
-        return {"ok": False, "message": str(exc)}
+        return {"ok": False, "message": str(exc), "db_path": str(DB_PATH)}
+
+
+def format_sync_result(result: dict) -> str:
+    if result.get("skipped"):
+        return "永続化スキップ"
+    parts = [
+        f"ok={result.get('ok')}",
+        f"github={result.get('github')}",
+        f"races={result.get('race_count', 0)}",
+        f"db={result.get('db_race_count', result.get('race_count', 0))}",
+        f"path={result.get('db_path', DB_PATH)}",
+    ]
+    if result.get("message"):
+        parts.append(str(result["message"]))
+    if result.get("errors"):
+        parts.append(f"pushed={','.join(result['errors'])}")
+    return " / ".join(parts)

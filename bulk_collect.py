@@ -310,11 +310,10 @@ def fetch_bulk(
             ),
         )
 
-    from github_persist import maybe_sync
+    from github_persist import format_sync_result, maybe_sync
 
     sync_result = maybe_sync("bulk_collect")
-    if sync_result.get("message"):
-        log.append(f"GitHub永続化: {sync_result.get('message')}")
+    log.append(f"GitHub永続化: {format_sync_result(sync_result)}")
 
     return {
         "ok": True,

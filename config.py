@@ -15,6 +15,7 @@ PERSIST_DIR = PROJECT_ROOT / "persist"
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "").strip()
 GITHUB_PERSIST_BRANCH = os.environ.get("GITHUB_PERSIST_BRANCH", "main").strip() or "main"
+GITHUB_REQUEST_TIMEOUT = int(os.environ.get("GITHUB_REQUEST_TIMEOUT", "60"))
 
 
 def resolve_db_path() -> Path:

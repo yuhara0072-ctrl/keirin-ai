@@ -402,11 +402,10 @@ def run_workflow(
         log.append("STEP 2-4/4: 分析・検知・レポート保存...")
         path = save_report(bet_type=bet_type)
         log.append(f"  → 保存: {path}")
-        from github_persist import maybe_sync
+        from github_persist import format_sync_result, maybe_sync
 
         sync_result = maybe_sync("workflow")
-        if sync_result.get("message"):
-            log.append(f"  → 永続化: {sync_result['message']}")
+        log.append(f"  → 永続化: {format_sync_result(sync_result)}")
         return True, "\n".join(log)
     except Exception as e:
         log.append(f"エラー: {e}")
