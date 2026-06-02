@@ -1165,7 +1165,7 @@ with tab_bankroll:
     st.markdown("#### 資金推移")
     fig = refreshed.get("fig_trend")
     if fig is not None:
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, key="bankroll_fig_trend")
 
     with st.expander("CLI出力"):
         st.text(lines_to_text(build_bankroll_lines(refreshed)))
@@ -2572,13 +2572,13 @@ with t_chart:
         if min_score != charts_bundle["min_score"]:
             charts_bundle = get_charts_bundle(bet_type, min_score=min_score)
 
-        st.plotly_chart(charts_bundle["fig_recovery_trend"], use_container_width=True)
-        st.plotly_chart(charts_bundle["fig_hit_rate"], use_container_width=True)
+        st.plotly_chart(charts_bundle["fig_recovery_trend"], use_container_width=True, key="charts_fig_recovery_trend")
+        st.plotly_chart(charts_bundle["fig_hit_rate"], use_container_width=True, key="charts_fig_hit_rate")
         if not charts_bundle["by_date"].empty and len(charts_bundle["by_date"]) > 1:
-            st.plotly_chart(charts_bundle["fig_recovery_by_date"], use_container_width=True)
-        st.plotly_chart(charts_bundle["fig_venue_ranking"], use_container_width=True)
-        st.plotly_chart(charts_bundle["fig_ai_distribution"], use_container_width=True)
-        st.plotly_chart(charts_bundle["fig_score_scatter"], use_container_width=True)
+            st.plotly_chart(charts_bundle["fig_recovery_by_date"], use_container_width=True, key="charts_fig_recovery_by_date")
+        st.plotly_chart(charts_bundle["fig_venue_ranking"], use_container_width=True, key="charts_fig_venue_ranking")
+        st.plotly_chart(charts_bundle["fig_ai_distribution"], use_container_width=True, key="charts_fig_ai_distribution")
+        st.plotly_chart(charts_bundle["fig_score_scatter"], use_container_width=True, key="charts_fig_score_scatter")
 
         st.markdown(f"##### 高スコアレース（≥ {min_score}）")
         high_df = charts_bundle["high_score_races"]
@@ -2723,7 +2723,7 @@ with tab_market:
                 hide_index=True,
             )
             st.markdown("##### 市場ヒートマップ")
-            st.plotly_chart(mb["fig_heatmap"], use_container_width=True)
+            st.plotly_chart(mb["fig_heatmap"], use_container_width=True, key="market_fig_heatmap")
 
         with st.expander("監視の見方"):
             st.markdown(
@@ -2898,7 +2898,7 @@ with t_prerace:
             )
 
         st.markdown("#### 市場ヒートマップ")
-        st.plotly_chart(pb["fig_heatmap"], use_container_width=True)
+        st.plotly_chart(pb["fig_heatmap"], use_container_width=True, key="prerace_fig_heatmap")
 
         st.markdown("#### AIスコアへの直前補正")
         if recommend_bundle.get("has_data"):
