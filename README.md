@@ -100,6 +100,7 @@ streamlit run app.py --server.port $PORT --server.address 0.0.0.0
 |--------|------|
 | `KEIRIN_AUTH_USERNAME` | ログイン用ユーザー名 |
 | `KEIRIN_AUTH_PASSWORD` | ログイン用パスワード |
+| `DATABASE_PATH` | SQLite の保存先（省略時は `data/keirin.db`） |
 
 **Render での設定手順**
 
@@ -127,6 +128,42 @@ streamlit run app.py
 
 認証成功後のみアプリ（ホーム含む）が表示されます。未設定の場合はログイン画面のみ表示されます。
 
+### SQLite 永続化（Render Disk）
+
+Render の Web Service は **再起動・再デプロイでローカルファイルが消えます**。保存レース数を維持するには **Persistent Disk** に SQLite を置きます。
+
+| 項目 | 値 |
+|------|-----|
+| 環境変数 | `DATABASE_PATH=/var/data/keirin.db` |
+| ディスクマウント | `/var/data` |
+| ローカル（未設定時） | `data/keirin.db` |
+
+`render.yaml` には Disk（1GB）と `DATABASE_PATH` が含まれています。**Persistent Disk は Starter 以上の有料プランが必要**です（無料プランでは Disk を付けられません）。
+
+**Blueprint 利用時（推奨）**
+
+1. Blueprint を Apply（`render.yaml` が Disk + `DATABASE_PATH` を作成）
+2. 認証用環境変数を設定して再デプロイ
+3. データ取得後、Render を再起動しても **保存レース数が維持**されていれば OK
+
+**手動で Disk を付ける場合**
+
+1. Web Service → **Disks** → **Add Disk**
+2. **Mount Path**: `/var/data`
+3. **Size**: 1 GB（以上、後から拡張のみ可能）
+4. **Environment** に `DATABASE_PATH` = `/var/data/keirin.db` を追加
+5. Save → 再デプロイ
+
+**ローカルで DATABASE_PATH を試す**
+
+```powershell
+$env:DATABASE_PATH="data/persistent/keirin.db"
+python main.py init
+streamlit run app.py
+```
+
+> レポート（`data/report_latest.txt`）や ML モデル（`data/models/`）は引き続き `data/` 配下です。DB のみ Disk に置く構成です。完全バックアップは **💾 バックアップ** タブを利用してください。
+
 ### 手順 A: Blueprint（推奨）
 
 1. GitHub にこのリポジトリを push する
@@ -153,9 +190,9 @@ streamlit run app.py
 ### Render 利用時の注意
 
 - **無料プラン**は一定時間アクセスがないとスリープします。初回表示に数十秒かかることがあります
-- **SQLite / data/** はコンテナ再起動で消えることがあります。初回は「まだデータがありません」と表示され、**🏠 ホーム → 今日の自動実行** でデータ取得してください
+- **DB 永続化**には Persistent Disk + `DATABASE_PATH` が必要です（`render.yaml` 参照）
+- Disk 未設定の場合、再起動で SQLite が消え保存レース数が 0 に戻ります
 - ログイン必須です。環境変数未設定のままではログイン画面のみ表示されます
-- 有料の **Persistent Disk** を付けると DB を保持できます（任意）
 
 ### ローカルで Render と同じ起動方法を試す
 
@@ -517,7 +554,7 @@ keirin_ai/
 ├── report.py            # txtレポート生成
 ├── db.py / config.py
 ├── data/
-│   ├── keirin.db        # SQLite（自動作成）
+│   ├── keirin.db        # SQLite（既定。Render では DATABASE_PATH で Disk 上に保存）
 │   └── report_latest.txt
 └── requirements.txt
 ```

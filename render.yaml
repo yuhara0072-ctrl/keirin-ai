@@ -1,19 +1,27 @@
 # Render Blueprint — https://render.com/docs/blueprint-spec
 # Dashboard → New → Blueprint → このリポジトリを選択
+#
+# Persistent Disk 利用には Starter 以上の有料プランが必要です。
 
 services:
   - type: web
     name: keirin-ai
     runtime: python
-    plan: free
+    plan: starter
     region: oregon
     branch: main
     buildCommand: pip install --upgrade pip && pip install -r requirements.txt
     startCommand: streamlit run app.py --server.port $PORT --server.address 0.0.0.0
     healthCheckPath: /
+    disk:
+      name: keirin-data
+      mountPath: /var/data
+      sizeGB: 1
     envVars:
       - key: PYTHON_VERSION
         value: "3.12.8"
+      - key: DATABASE_PATH
+        value: /var/data/keirin.db
       - key: KEIRIN_AUTH_USERNAME
         sync: false
       - key: KEIRIN_AUTH_PASSWORD
