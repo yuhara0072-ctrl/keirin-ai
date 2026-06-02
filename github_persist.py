@@ -668,7 +668,7 @@ def restore_if_needed() -> Optional[dict]:
     conn = get_connection()
     try:
         if table_exists(conn, "races") and safe_table_count(conn, "races") > 0:
-            return None
+            return {"skipped": True, "reason": "db_not_empty"}
     finally:
         conn.close()
 
@@ -678,22 +678,27 @@ def restore_if_needed() -> Optional[dict]:
         try:
             snapshot = download_github_snapshot()
             source = "github"
-        except Exception:
+        except Exception as exc:
+            print(f"[auth] restore github download error: {exc}", flush=True)
             snapshot = None
     if snapshot is None:
         snapshot = load_local_snapshot()
         source = "local" if snapshot else ""
 
     if not snapshot:
-        return None
+        return {"skipped": True, "reason": "no_snapshot"}
 
     races = snapshot.get("races.json") or []
     if not races:
-        return None
+        return {"skipped": True, "reason": "empty_races_json"}
 
-    stats = import_snapshot(snapshot)
-    stats["source"] = source
-    return stats
+    try:
+        stats = import_snapshot(snapshot)
+        stats["source"] = source
+        return stats
+    except Exception as exc:
+        print(f"[auth] restore import error: {exc}", flush=True)
+        return {"ok": False, "error": str(exc), "source": source}
 
 
 def maybe_sync(reason: str) -> dict:

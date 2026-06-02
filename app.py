@@ -183,7 +183,12 @@ from ui_mobile import (
     render_line_card,
     render_target_card,
 )
-from auth import render_logout_control, require_authentication
+from auth import (
+    ensure_db_ready,
+    init_auth_session,
+    render_logout_control,
+    require_authentication,
+)
 from config import DAILY_FETCH_LIMIT, DATA_DIR, DEFAULT_BANKROLL, TARGET_RACES
 from data_progress import get_data_progress_bundle
 from db import ensure_db, get_db_status, init_db
@@ -317,6 +322,22 @@ def load_app_bundles(bet_type: str) -> dict:
         ),
         "detect_df": detect_all(bet_type),
     }
+
+
+def invalidate_bundles_cache() -> None:
+    for key in list(st.session_state.keys()):
+        if str(key).startswith("bundles_"):
+            st.session_state.pop(key, None)
+
+
+def load_app_bundles_cached(bet_type: str, *, deep_check: bool = False) -> tuple[dict, str | None]:
+    cache_key = f"bundles_{bet_type}_{deep_check}"
+    if cache_key in st.session_state:
+        return st.session_state[cache_key]
+    with st.spinner("アプリデータを読み込み中..."):
+        bundles, err = load_app_bundles_safe(bet_type, deep_check=deep_check)
+    st.session_state[cache_key] = (bundles, err)
+    return bundles, err
 
 
 def load_app_bundles_safe(bet_type: str, *, deep_check: bool = False) -> tuple[dict, str | None]:
@@ -559,11 +580,15 @@ st.set_page_config(
 
 inject_mobile_style()
 
+init_auth_session()
+
 if not require_authentication():
     st.stop()
 
-# Streamlit Cloud: 起動直後に DB / テーブルを作成（サイドバーより前）
-ensure_db()
+try:
+    ensure_db_ready()
+except Exception as _bootstrap_exc:
+    print(f"[auth] ensure_db_ready error: {_bootstrap_exc}", flush=True)
 
 st.title("🚴 競輪観測AI")
 st.caption("🏠 運用モード — ホームから毎日の判断")
@@ -631,13 +656,16 @@ if run_btn:
 
     if success:
         st.success("workflow が完了しました")
+        invalidate_bundles_cache()
     else:
         st.error("workflow でエラーが発生しました")
     with st.expander("実行ログ", expanded=True):
         st.text(combined_log)
 
 _check_deep = st.session_state.pop("system_check_deep", False)
-_bundles, _bundle_error = load_app_bundles_safe(bet_type, deep_check=_check_deep)
+if _check_deep:
+    invalidate_bundles_cache()
+_bundles, _bundle_error = load_app_bundles_cached(bet_type, deep_check=_check_deep)
 
 analyze_text = _bundles["analyze_text"]
 ai_bundle = _bundles["ai_bundle"]
