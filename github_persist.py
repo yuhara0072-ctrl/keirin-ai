@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import pandas as pd
 import requests
@@ -24,6 +25,8 @@ from config import (
     GITHUB_TOKEN,
     PERSIST_DIR,
 )
+
+logger = logging.getLogger("github_persist")
 
 PERSIST_VERSION = 1
 MAX_CHUNK_BYTES = 900_000
@@ -191,12 +194,30 @@ def _db_race_count() -> int:
         conn.close()
 
 
-def export_snapshot() -> dict[str, Any]:
-    races = persist_races()
-    results = persist_results()
+def _db_result_count() -> int:
+    from db import get_connection, safe_table_count, table_exists
+
+    conn = get_connection()
+    try:
+        if not table_exists(conn, "results"):
+            return 0
+        return safe_table_count(conn, "results")
+    finally:
+        conn.close()
+
+
+def _emit_log(log_fn: Optional[Callable[[str], None]], message: str) -> None:
+    logger.info(message)
+    if log_fn:
+        log_fn(message)
+
+
+def build_snapshot_files(
+    races: list[dict],
+    results: list[dict],
+) -> dict[str, Any]:
     entries = _persist_entries()
     patterns = _persist_learned_patterns()
-
     meta = {
         "version": PERSIST_VERSION,
         "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -205,7 +226,6 @@ def export_snapshot() -> dict[str, Any]:
         "result_count": len(results),
         "learning_count": len(patterns),
     }
-
     files: dict[str, Any] = {
         "meta.json": meta,
         "races.json": races,
@@ -213,7 +233,6 @@ def export_snapshot() -> dict[str, Any]:
         "results.json": results,
         "learned_patterns.json": patterns,
     }
-
     from db import get_connection, table_exists
 
     conn = get_connection()
@@ -228,8 +247,13 @@ def export_snapshot() -> dict[str, Any]:
         raise RuntimeError(
             f"export mismatch: DB has {db_count} races at {DB_PATH} but persist_races() returned 0"
         )
-
     return files
+
+
+def export_snapshot() -> dict[str, Any]:
+    races = persist_races()
+    results = persist_results()
+    return build_snapshot_files(races, results)
 
 
 def _import_table(conn, table: str, records: list[dict]) -> None:
@@ -382,26 +406,58 @@ def download_github_snapshot() -> Optional[dict[str, Any]]:
     return files
 
 
-def sync_to_github(reason: str = "update") -> dict:
+def sync_to_github(
+    reason: str = "update",
+    *,
+    log_fn: Optional[Callable[[str], None]] = None,
+) -> dict:
+    push_log: list[str] = []
     db_races_before = _db_race_count()
-    files = export_snapshot()
-    exported_races = len(files.get("races.json") or [])
+    db_results_before = _db_result_count()
+    _emit_log(
+        log_fn,
+        f"DB件数: races={db_races_before} results={db_results_before} path={DB_PATH}",
+    )
+
+    _emit_log(log_fn, "persist_races() 呼び出し")
+    races = persist_races()
+    _emit_log(log_fn, f"persist_races() 完了: export={len(races)} 件")
+
+    _emit_log(log_fn, "persist_results() 呼び出し")
+    results = persist_results()
+    _emit_log(log_fn, f"persist_results() 完了: export={len(results)} 件")
+
+    files = build_snapshot_files(races, results)
+    exported_races = len(races)
+    exported_results = len(results)
+    _emit_log(
+        log_fn,
+        f"export件数: races={exported_races} results={exported_results} "
+        f"entries={len(files.get('entries.json') or [])} "
+        f"learning={len(files.get('learned_patterns.json') or [])}",
+    )
+
     save_local_snapshot(files)
     result = {
         "ok": True,
         "local": True,
         "github": False,
         "db_race_count": db_races_before,
+        "db_result_count": db_results_before,
         "race_count": exported_races,
-        "result_count": len(files.get("results.json") or []),
+        "result_count": exported_results,
         "learning_count": len(files.get("learned_patterns.json") or []),
         "db_path": str(DB_PATH),
+        "github_repo": GITHUB_REPO,
+        "github_enabled": is_github_enabled(),
         "message": "",
         "errors": [],
+        "push_log": push_log,
     }
 
     if not is_github_enabled():
         result["message"] = "local only (GITHUB_TOKEN / GITHUB_REPO 未設定)"
+        _emit_log(log_fn, result["message"])
         return result
 
     if db_races_before > 0 and exported_races == 0:
@@ -409,25 +465,70 @@ def sync_to_github(reason: str = "update") -> dict:
         result["message"] = (
             f"GitHub同期を中止: DB={db_races_before}件 なのに export=0件 ({DB_PATH})"
         )
+        _emit_log(log_fn, result["message"])
         return result
 
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     commit_msg = f"chore: persist keirin data ({reason}) at {stamp}"
     pushed: list[str] = []
+    _emit_log(
+        log_fn,
+        f"GitHub push 開始: repo={GITHUB_REPO} branch={GITHUB_PERSIST_BRANCH}",
+    )
     try:
         for name in _ordered_file_names(files):
             text = json.dumps(files[name], ensure_ascii=False, separators=(",", ":"))
+            size = len(text.encode("utf-8"))
+            _emit_log(log_fn, f"GitHub PUT {name} ({size} bytes)...")
             _github_put_file(name, text, commit_msg)
             pushed.append(name)
+            push_log.append(f"{name}: OK ({size} bytes)")
+            _emit_log(log_fn, f"GitHub PUT {name} → OK")
         result["github"] = True
         result["message"] = (
-            f"github synced ({exported_races} races, {result['result_count']} results)"
+            f"github synced ({exported_races} races, {exported_results} results)"
         )
+        _emit_log(log_fn, f"GitHub push 完了: {result['message']}")
     except Exception as exc:
         result["ok"] = False
         result["errors"] = pushed
         result["message"] = str(exc)
+        push_log.append(f"ERROR: {exc}")
+        _emit_log(log_fn, f"GitHub push 失敗: {exc}")
+        if pushed:
+            _emit_log(log_fn, f"push済みファイル: {', '.join(pushed)}")
+    result["push_log"] = push_log
     return result
+
+
+def workflow_persist_and_sync(reason: str = "workflow") -> tuple[dict, list[str]]:
+    """workflow 終了時: persist_races / persist_results を明示実行して GitHub 同期"""
+    lines: list[str] = []
+
+    def log_fn(msg: str) -> None:
+        lines.append(f"  {msg}")
+
+    lines.append("STEP 5/5: GitHub永続化")
+    lines.append(f"  GITHUB_REPO={GITHUB_REPO or '(未設定)'}")
+    lines.append(f"  GITHUB_TOKEN={'設定済' if GITHUB_TOKEN else '未設定'}")
+    lines.append(f"  GITHUB_BRANCH={GITHUB_PERSIST_BRANCH}")
+
+    try:
+        result = sync_to_github(reason, log_fn=log_fn)
+    except Exception as exc:
+        result = {
+            "ok": False,
+            "github": False,
+            "message": str(exc),
+            "db_path": str(DB_PATH),
+            "push_log": [],
+        }
+        lines.append(f"  永続化エラー: {exc}")
+
+    lines.append(f"  結果: {format_sync_result(result)}")
+    for entry in result.get("push_log") or []:
+        lines.append(f"  push: {entry}")
+    return result, lines
 
 
 def restore_if_needed() -> Optional[dict]:
@@ -479,8 +580,10 @@ def format_sync_result(result: dict) -> str:
     parts = [
         f"ok={result.get('ok')}",
         f"github={result.get('github')}",
-        f"races={result.get('race_count', 0)}",
-        f"db={result.get('db_race_count', result.get('race_count', 0))}",
+        f"export_races={result.get('race_count', 0)}",
+        f"export_results={result.get('result_count', 0)}",
+        f"db_races={result.get('db_race_count', 0)}",
+        f"db_results={result.get('db_result_count', 0)}",
         f"path={result.get('db_path', DB_PATH)}",
     ]
     if result.get("message"):
