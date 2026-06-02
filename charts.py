@@ -17,6 +17,21 @@ COLOR_HIT = "#16a34a"
 COLOR_SCORE = "#7c3aed"
 
 
+def _ensure_columns(df: pd.DataFrame, defaults: dict[str, object]) -> pd.DataFrame:
+    """欠損カラムを補完（Plotly hover_data / 軸参照の落ち込み防止）"""
+    if df.empty:
+        return df
+    out = df.copy()
+    for col, default in defaults.items():
+        if col not in out.columns:
+            out[col] = default
+    return out
+
+
+def _hover_data_existing(df: pd.DataFrame, columns: list[str]) -> list[str]:
+    return [c for c in columns if c in df.columns]
+
+
 def _race_summary(bet_type: str = "3連単") -> pd.DataFrame:
     """レース単位の回収率・的中率"""
     df = load_bet_frame(bet_type=bet_type)
@@ -42,7 +57,8 @@ def _race_summary(bet_type: str = "3連単") -> pd.DataFrame:
         .reset_index()
     )
     agg["recovery_rate"] = (agg["total_return"] / agg["total_bet"] * 100).round(1)
-    agg["hit_rate"] = (agg["hits"] / agg["bets"] * 100).round(1)
+    agg["hit_rate"] = (agg["hits"] / agg["bets"].replace(0, pd.NA) * 100).round(1)
+    agg["hit_rate"] = agg["hit_rate"].fillna(0.0)
     agg["race_label"] = (
         agg["race_date"].astype(str)
         + " "
@@ -254,6 +270,9 @@ def fig_hit_rate_trend(summary: pd.DataFrame, by_date: pd.DataFrame) -> go.Figur
         fig.update_layout(title="的中率推移（データなし）", template=PLOTLY_TEMPLATE)
         return fig
 
+    summary = _ensure_columns(summary, {"hit_rate": 0.0, "race_order": 0, "race_label": ""})
+    by_date = _ensure_columns(by_date, {"hit_rate": 0.0})
+
     fig.add_trace(
         go.Scatter(
             x=summary["race_order"],
@@ -299,36 +318,50 @@ def fig_ai_score_scatter(scores: pd.DataFrame, bet_type: str = "3連単") -> go.
         return fig
 
     summary = _race_summary(bet_type)
+    merge_cols = ["race_id", "recovery_rate", "hit_rate"]
     if summary.empty:
         merged = scores.copy()
-        merged["recovery_rate"] = None
     else:
-        merged = scores.merge(
-            summary[["race_id", "recovery_rate", "hit_rate"]],
-            on="race_id",
-            how="left",
-        )
+        available = [c for c in merge_cols if c in summary.columns]
+        merged = scores.merge(summary[available], on="race_id", how="left")
 
-    fig = px.scatter(
+    merged = _ensure_columns(
         merged,
-        x="ai_total_score",
-        y="recovery_rate",
-        color="ev_rank",
-        size="honmei_trust",
-        hover_data=["venue_name", "race_no", "ev_rank", "hit_rate"],
-        labels={
+        {
+            "recovery_rate": None,
+            "hit_rate": None,
+            "venue_name": "",
+            "race_no": None,
+            "ev_rank": "",
+            "honmei_trust": 1.0,
+            "ai_total_score": 0.0,
+        },
+    )
+
+    scatter_kwargs: dict = {
+        "x": "ai_total_score",
+        "y": "recovery_rate",
+        "color": "ev_rank",
+        "hover_data": _hover_data_existing(
+            merged, ["venue_name", "race_no", "ev_rank", "hit_rate"]
+        ),
+        "labels": {
             "ai_total_score": "AI総合スコア",
             "recovery_rate": "回収率 (%)",
             "ev_rank": "ランク",
         },
-        color_discrete_map={
+        "color_discrete_map": {
             "S": "#059669",
             "A": "#2563eb",
             "B": "#ca8a04",
             "C": "#ea580c",
             "D": "#94a3b8",
         },
-    )
+    }
+    if merged["honmei_trust"].notna().any():
+        scatter_kwargs["size"] = "honmei_trust"
+
+    fig = px.scatter(merged, **scatter_kwargs)
     fig.update_layout(
         title="AIスコアと回収率（バブル＝本命信頼度）",
         template=PLOTLY_TEMPLATE,
