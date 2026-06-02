@@ -218,6 +218,9 @@ def save_learned_patterns(bet_type: str = "3連単") -> int:
                     datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 ),
             )
+    from github_persist import maybe_sync
+
+    maybe_sync("learning")
     return len(patterns)
 
 

@@ -100,7 +100,9 @@ streamlit run app.py --server.port $PORT --server.address 0.0.0.0
 |--------|------|
 | `KEIRIN_AUTH_USERNAME` | ログイン用ユーザー名 |
 | `KEIRIN_AUTH_PASSWORD` | ログイン用パスワード |
-| `DATABASE_PATH` | SQLite の保存先（省略時は `data/keirin.db`） |
+| `GITHUB_TOKEN` | GitHub PAT（`repo` 権限）— データ永続化 |
+| `GITHUB_REPO` | リポジトリ名（例: `yuhara0072-ctrl/keirin-ai`） |
+| `GITHUB_PERSIST_BRANCH` | 保存ブランチ（省略時 `main`） |
 
 **Render での設定手順**
 
@@ -128,50 +130,57 @@ streamlit run app.py
 
 認証成功後のみアプリ（ホーム含む）が表示されます。未設定の場合はログイン画面のみ表示されます。
 
-### SQLite 永続化（Render Disk）
+### データ永続化（GitHub JSON — 無料プラン対応）
 
-Render の Web Service は **再起動・再デプロイでローカルファイルが消えます**。保存レース数を維持するには **Persistent Disk** に SQLite を置きます。
+Render 無料プランでは **再起動で SQLite が消えます**。そのため:
 
-| 項目 | 値 |
-|------|-----|
-| 環境変数 | `DATABASE_PATH=/var/data/keirin.db` |
-| ディスクマウント | `/var/data` |
-| ローカル（未設定時） | `data/keirin.db` |
+- **永続化**: レースデータ・学習データを `persist/*.json` として **GitHub に保存**
+- **実行時**: 起動時に JSON → SQLite へ復元（分析用の一時キャッシュ）
+- **有料 Disk 不要**
 
-`render.yaml` には Disk（1GB）と `DATABASE_PATH` が含まれています。**Persistent Disk は Starter 以上の有料プランが必要**です（無料プランでは Disk を付けられません）。
+| 保存先 | 内容 |
+|--------|------|
+| `persist/races.json` 等 | レース・出走・オッズ・結果 |
+| `persist/learned_patterns.json` | 学習データ |
+| `persist/meta.json` | 保存レース数・更新日時 |
 
-**Blueprint 利用時（推奨）**
+**GitHub Token の作成**
 
-1. Blueprint を Apply（`render.yaml` が Disk + `DATABASE_PATH` を作成）
-2. 認証用環境変数を設定して再デプロイ
-3. データ取得後、Render を再起動しても **保存レース数が維持**されていれば OK
+1. GitHub → **Settings** → **Developer settings** → **Personal access tokens**
+2. **Fine-grained** または **Classic** で `repo` 権限を付与
+3. Render の **Environment** に設定:
+   - `GITHUB_TOKEN` = 発行したトークン
+   - `GITHUB_REPO` = `yuhara0072-ctrl/keirin-ai`（自分のリポジトリ）
 
-**手動で Disk を付ける場合**
+**動作の流れ**
 
-1. Web Service → **Disks** → **Add Disk**
-2. **Mount Path**: `/var/data`
-3. **Size**: 1 GB（以上、後から拡張のみ可能）
-4. **Environment** に `DATABASE_PATH` = `/var/data/keirin.db` を追加
-5. Save → 再デプロイ
+1. アプリ起動 → GitHub から `persist/` を取得 → SQLite に復元
+2. データ取得 / 学習 / 自動実行 完了後 → JSON をエクスポート → GitHub に push
+3. Render 再起動後も **保存レース数・学習データが維持**される
 
-**ローカルで DATABASE_PATH を試す**
+**ローカル開発**
+
+- Token 未設定: `persist/` に JSON 保存のみ（手動で git commit 可能）
+- Token 設定: Render と同様に GitHub API で自動同期
 
 ```powershell
-$env:DATABASE_PATH="data/persistent/keirin.db"
-python main.py init
+$env:GITHUB_TOKEN="ghp_xxxx"
+$env:GITHUB_REPO="yuhara0072-ctrl/keirin-ai"
 streamlit run app.py
 ```
 
-> レポート（`data/report_latest.txt`）や ML モデル（`data/models/`）は引き続き `data/` 配下です。DB のみ Disk に置く構成です。完全バックアップは **💾 バックアップ** タブを利用してください。
+> レポート（`data/report_latest.txt`）や ML モデルは Render 再起動で消える場合があります。DB 本体は GitHub 永続化、完全バックアップは **💾 バックアップ** タブを利用してください。
 
 ### 手順 A: Blueprint（推奨）
 
 1. GitHub にこのリポジトリを push する
 2. [Render Dashboard](https://dashboard.render.com/) → **New** → **Blueprint**
 3. リポジトリを選択 → `render.yaml` を読み込んで **Apply**
-4. サービス設定で **Environment** を開き、`KEIRIN_AUTH_USERNAME` / `KEIRIN_AUTH_PASSWORD` を設定
+4. サービス設定で **Environment** を開き、以下を設定
+   - `KEIRIN_AUTH_USERNAME` / `KEIRIN_AUTH_PASSWORD`
+   - `GITHUB_TOKEN` / `GITHUB_REPO`
 5. デプロイ完了後、表示された URL（例: `https://keirin-ai.onrender.com`）を **スマホのブラウザ** で開く
-6. ログイン → **🏠 ホーム** が表示されれば OK
+6. ログイン → **🏠 ホーム** → データ取得 → 再起動後も保存レース数が維持されていれば OK
 
 ### 手順 B: Web Service を手動作成
 
@@ -184,15 +193,15 @@ streamlit run app.py
 | Build Command | `pip install --upgrade pip && pip install -r requirements.txt` |
 | Start Command | `streamlit run app.py --server.port $PORT --server.address 0.0.0.0` |
 
-3. **Environment** に `KEIRIN_AUTH_USERNAME` / `KEIRIN_AUTH_PASSWORD` を追加
+3. **Environment** に認証 + GitHub 永続化の環境変数を追加
 4. **Create Web Service** でデプロイ
 
 ### Render 利用時の注意
 
 - **無料プラン**は一定時間アクセスがないとスリープします。初回表示に数十秒かかることがあります
-- **DB 永続化**には Persistent Disk + `DATABASE_PATH` が必要です（`render.yaml` 参照）
-- Disk 未設定の場合、再起動で SQLite が消え保存レース数が 0 に戻ります
-- ログイン必須です。環境変数未設定のままではログイン画面のみ表示されます
+- **保存レース数・学習データ**は `GITHUB_TOKEN` 設定時に GitHub へ自動保存されます
+- `GITHUB_TOKEN` 未設定の場合、再起動でデータが消えます
+- ログイン必須です。認証環境変数未設定のままではログイン画面のみ表示されます
 
 ### ローカルで Render と同じ起動方法を試す
 
@@ -530,12 +539,15 @@ streamlit run app.py
 keirin_ai/
 ├── app.py               # Streamlit アプリ（画面）
 ├── auth.py              # ログイン認証
-├── render.yaml          # Render Blueprint
-├── Procfile             # Render / Heroku 形式の起動定義
+├── github_persist.py    # GitHub JSON 永続化
+├── render.yaml          # Render Blueprint（無料プラン）
+├── Procfile             # 起動コマンド
 ├── runtime.txt          # Python バージョン
 ├── .streamlit/
-│   ├── config.toml      # Streamlit 本番設定
+│   ├── config.toml
 │   └── secrets.toml.example
+├── persist/             # レース・学習データ（GitHub に保存）
+│   └── meta.json
 ├── main.py              # 入口（コマンドライン）
 ├── fetch_daily.py       # 毎日複数レース取得
 ├── fetch_entries.py     # 出走表
@@ -554,7 +566,7 @@ keirin_ai/
 ├── report.py            # txtレポート生成
 ├── db.py / config.py
 ├── data/
-│   ├── keirin.db        # SQLite（既定。Render では DATABASE_PATH で Disk 上に保存）
+│   ├── keirin.db        # SQLite（実行用キャッシュ。永続化は persist/）
 │   └── report_latest.txt
 └── requirements.txt
 ```

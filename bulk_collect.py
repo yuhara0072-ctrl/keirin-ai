@@ -310,6 +310,12 @@ def fetch_bulk(
             ),
         )
 
+    from github_persist import maybe_sync
+
+    sync_result = maybe_sync("bulk_collect")
+    if sync_result.get("message"):
+        log.append(f"GitHub永続化: {sync_result.get('message')}")
+
     return {
         "ok": True,
         "run_id": run_id,

@@ -193,6 +193,9 @@ def fetch_daily(
 
     ok = sum(1 for r in results if not r["error"])
     print(f"\n完了: {ok}/{len(targets)} 件成功")
+    from github_persist import maybe_sync
+
+    maybe_sync("fetch_daily")
     return results
 
 

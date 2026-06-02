@@ -409,6 +409,15 @@ def run_full_ops(
     if trigger == "scheduled":
         set_ops_config("last_scheduled_date", date.today().isoformat())
 
+    if status == "ok":
+        from github_persist import maybe_sync
+
+        sync_result = maybe_sync("daily_auto")
+        if sync_result.get("github"):
+            _append_log(log, f"GitHub永続化: {sync_result.get('message', 'OK')}")
+        elif sync_result.get("message"):
+            _append_log(log, f"永続化: {sync_result.get('message')}")
+
     return {
         "ok": status == "ok",
         "status": status,

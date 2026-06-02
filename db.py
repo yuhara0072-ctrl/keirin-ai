@@ -99,6 +99,12 @@ def ensure_db() -> None:
     """アプリ起動時に DB と全テーブルを idempotent に作成"""
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     init_db()
+    try:
+        from github_persist import restore_if_needed
+
+        restore_if_needed()
+    except Exception:
+        pass
 
 
 @contextmanager
