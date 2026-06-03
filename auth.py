@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hmac
 import os
+import time
 from typing import Optional
 
 import streamlit as st
@@ -13,6 +14,9 @@ SESSION_USERNAME = "auth_username"
 SESSION_DB_BOOTSTRAPPED = "db_bootstrapped"
 WORKFLOW_LAST_RESULT = "workflow_last_result"
 DEFER_HEAVY_BUNDLES = "defer_heavy_bundles"
+LOGIN_FLASH_UNTIL = "login_flash_until"
+PENDING_DB_RESTORE = "pending_db_restore"
+FULL_BUNDLES_LOADED = "full_bundles_loaded"
 
 
 def init_auth_session() -> None:
@@ -86,6 +90,9 @@ def logout() -> None:
     st.session_state[SESSION_AUTHENTICATED] = False
     st.session_state[SESSION_USERNAME] = ""
     st.session_state[SESSION_DB_BOOTSTRAPPED] = False
+    st.session_state.pop(LOGIN_FLASH_UNTIL, None)
+    st.session_state.pop(FULL_BUNDLES_LOADED, None)
+    st.session_state.pop(PENDING_DB_RESTORE, None)
     # ログアウトで DB は消さない（persist / GitHub が正）
     for key in list(st.session_state.keys()):
         if str(key).startswith("bundles_"):
@@ -127,16 +134,50 @@ def run_login_bootstrap() -> dict:
     return outcome
 
 
-def ensure_db_ready() -> None:
-    """認証済みセッションで DB を準備。Render 再起動で DB だけ空になった場合も復元"""
+def ensure_db_schema_only() -> None:
+    """テーブル作成のみ（ログイン直後用・GitHub復元は後回し）"""
+    try:
+        from db import init_db
+
+        init_db()
+    except Exception as exc:
+        print(f"[auth] init_db error: {exc}", flush=True)
+
+
+def ensure_db_ready(*, force_restore: bool = False) -> None:
+    """DB 復元が必要なときだけ bootstrap（詳細タブ読み込み時など）"""
+    if not force_restore and not st.session_state.get(PENDING_DB_RESTORE, True):
+        ensure_db_schema_only()
+        return
+
     count = _race_count_safe()
     if count == 0:
         st.session_state.pop(SESSION_DB_BOOTSTRAPPED, None)
     if not st.session_state.get(SESSION_DB_BOOTSTRAPPED):
         run_login_bootstrap()
+        st.session_state[PENDING_DB_RESTORE] = False
     elif count == 0:
         print("[auth] db empty after bootstrapped — retry restore", flush=True)
         run_login_bootstrap()
+        st.session_state[PENDING_DB_RESTORE] = False
+    else:
+        st.session_state[PENDING_DB_RESTORE] = False
+
+
+def mark_pending_restore() -> None:
+    st.session_state[PENDING_DB_RESTORE] = True
+    st.session_state.pop(SESSION_DB_BOOTSTRAPPED, None)
+
+
+def render_login_flash() -> None:
+    """ログイン成功メッセージ（約3秒で消える）"""
+    until = float(st.session_state.get(LOGIN_FLASH_UNTIL) or 0)
+    if until <= 0:
+        return
+    if time.time() < until:
+        st.success("ログインしました。", icon="✅")
+    else:
+        st.session_state.pop(LOGIN_FLASH_UNTIL, None)
 
 
 def render_login_page() -> bool:
@@ -182,10 +223,12 @@ password = "your_password"
         return False
 
     if authenticate(username, password):
-        print("[auth] auth success", flush=True)
-        run_login_bootstrap()
+        print("[auth] auth success (deferred restore)", flush=True)
+        ensure_db_schema_only()
+        mark_pending_restore()
+        st.session_state[LOGIN_FLASH_UNTIL] = time.time() + 3
+        st.session_state.pop(FULL_BUNDLES_LOADED, None)
         log_session_state("login")
-        st.success("ログインしました。アプリを読み込んでいます…")
         return True
 
     st.error("ユーザー名またはパスワードが正しくありません。")

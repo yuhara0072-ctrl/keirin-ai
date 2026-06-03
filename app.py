@@ -185,11 +185,15 @@ from ui_mobile import (
 )
 from auth import (
     DEFER_HEAVY_BUNDLES,
+    FULL_BUNDLES_LOADED,
+    PENDING_DB_RESTORE,
     WORKFLOW_LAST_RESULT,
     ensure_db_ready,
+    ensure_db_schema_only,
     init_auth_session,
     log_session_state,
     reinforce_authenticated,
+    render_login_flash,
     render_logout_control,
     require_authentication,
 )
@@ -233,6 +237,57 @@ def lines_to_text(lines: list[str]) -> str:
 def db_status() -> dict:
     """後方互換 — get_db_status() へ委譲"""
     return get_db_status()
+
+
+def get_quick_data_status() -> dict:
+    """件数だけ先に表示（DB 優先、空なら GitHub meta）"""
+    status = db_status()
+    if status.get("races", 0) > 0:
+        status["source"] = "db"
+        return status
+    try:
+        from github_persist import get_persist_meta_summary
+
+        meta = get_persist_meta_summary()
+        if meta and int(meta.get("race_count") or 0) > 0:
+            return {
+                "races": int(meta.get("race_count") or 0),
+                "results": int(meta.get("result_count") or 0),
+                "odds": 0,
+                "learning": int(meta.get("learning_count") or 0),
+                "ready": True,
+                "source": meta.get("_source", "meta"),
+            }
+    except Exception:
+        pass
+    status["source"] = "empty"
+    return status
+
+
+def load_full_bundles_and_restore(bet_type: str, *, deep_check: bool = False) -> None:
+    """詳細タブ用 — GitHub 復元 + 全バンドル読み込み"""
+    ensure_db_ready(force_restore=True)
+    invalidate_bundles_cache()
+    bundles, err = load_app_bundles_cached(bet_type, deep_check=deep_check)
+    st.session_state[FULL_BUNDLES_LOADED] = True
+    st.session_state["full_bundles_data"] = bundles
+    st.session_state["full_bundles_error"] = err
+    st.session_state.pop(DEFER_HEAVY_BUNDLES, None)
+    print("[app] full bundles loaded", flush=True)
+
+
+def prompt_load_bundles_if_needed(tab_label: str, bet_type: str) -> bool:
+    """未読み込みならプレースホルダを表示して True（本文スキップ）"""
+    if st.session_state.get(FULL_BUNDLES_LOADED):
+        return False
+    st.info(
+        f"「{tab_label}」の詳細はまだ読み込んでいません。"
+        " ホームの「詳細データを読み込む」または下のボタンで読み込めます。"
+    )
+    if st.button(f"{tab_label} を読み込む", key=f"load_tab_{tab_label}", use_container_width=True):
+        load_full_bundles_and_restore(bet_type)
+        st.rerun()
+    return True
 
 
 def empty_recommend_bundle() -> dict:
@@ -343,12 +398,20 @@ def invalidate_bundles_cache() -> None:
             st.session_state.pop(key, None)
 
 
-def load_app_bundles_cached(bet_type: str, *, deep_check: bool = False) -> tuple[dict, str | None]:
+def load_app_bundles_cached(
+    bet_type: str,
+    *,
+    deep_check: bool = False,
+    show_spinner: bool = True,
+) -> tuple[dict, str | None]:
     cache_key = f"bundles_{bet_type}_{deep_check}"
     if cache_key in st.session_state:
         return st.session_state[cache_key]
     try:
-        with st.spinner("アプリデータを読み込み中..."):
+        if show_spinner:
+            with st.spinner("詳細データを読み込み中..."):
+                bundles, err = load_app_bundles_safe(bet_type, deep_check=deep_check)
+        else:
             bundles, err = load_app_bundles_safe(bet_type, deep_check=deep_check)
         st.session_state[cache_key] = (bundles, err)
         return bundles, err
@@ -550,10 +613,12 @@ init_auth_session()
 if not require_authentication():
     st.stop()
 
+render_login_flash()
+
 try:
-    ensure_db_ready()
+    ensure_db_schema_only()
 except Exception as _bootstrap_exc:
-    print(f"[auth] ensure_db_ready error: {_bootstrap_exc}", flush=True)
+    print(f"[auth] ensure_db_schema_only error: {_bootstrap_exc}", flush=True)
 
 st.title("🚴 競輪観測AI")
 st.caption("🏠 運用モード — ホームから毎日の判断")
@@ -581,94 +646,116 @@ with safe_page("サイドバー"):
                 index=0,
             )
 
-        status = db_status()
+        status = get_quick_data_status()
         with st.expander("📊 データ件数", expanded=True):
+            src = status.get("source", "")
+            cap = f" ({src})" if src and src != "db" else ""
             mobile_metrics(
                 [
-                    ("レース", status["races"]),
+                    (f"レース{cap}", status["races"]),
                     ("結果", status["results"]),
-                    ("オッズ", status["odds"]),
+                    ("オッズ", status["odds"] or "—"),
                 ],
                 per_row=1,
             )
 
+        if run_btn:
+            venue = venue_code.strip() or None
+            persist_lines: list[str] = []
+            sync_result: dict = {}
+            with st.spinner("workflow 実行中（数分かかります）..."):
+                success, log_text = run_workflow(
+                    kaisai_date=kaisai_date,
+                    limit=int(limit),
+                    with_result=with_result,
+                    venue_code=venue,
+                    bet_type=bet_type,
+                )
+            print(f"[workflow] done success={success}", flush=True)
+
+            persist_ok = False
+            if success:
+                try:
+                    from github_persist import execute_workflow_persist_with_print
+
+                    sync_result, persist_lines = execute_workflow_persist_with_print(
+                        "workflow"
+                    )
+                    persist_ok = bool(sync_result.get("ok")) and sync_result.get(
+                        "race_count", 0
+                    ) > 0
+                except Exception as exc:
+                    print(f"[persist] error: {exc}", flush=True)
+                    persist_lines = [f"永続化エラー: {exc}"]
+            else:
+                persist_lines = ["fetch/report が失敗したため永続化をスキップしました"]
+
+            combined_log = log_text
+            if persist_lines:
+                combined_log = f"{log_text}\n" + "\n".join(
+                    f"  {line}" if not line.startswith("---") else line
+                    for line in persist_lines
+                )
+
+            workflow_ok = success and persist_ok
+            race_n = int(sync_result.get("race_count") or 0)
+            if workflow_ok:
+                msg = f"workflow 完了 — レース {race_n} 件を保存"
+                if sync_result.get("github"):
+                    msg += "（GitHub data ブランチ）"
+            else:
+                msg = "workflow エラー（ログを確認）"
+
+            reinforce_authenticated()
+            log_session_state("post-workflow")
+            st.session_state[WORKFLOW_LAST_RESULT] = {
+                "ok": workflow_ok,
+                "message": msg,
+                "log": combined_log,
+                "race_count": race_n,
+                "github": bool(sync_result.get("github")),
+            }
+            invalidate_bundles_cache()
+            st.session_state.pop(FULL_BUNDLES_LOADED, None)
+            st.session_state[PENDING_DB_RESTORE] = False
+            status = db_status()
+            print(
+                f"[workflow] db after persist: races={status['races']} "
+                f"results={status['results']} learning={status.get('learning', 0)}",
+                flush=True,
+            )
+
+        _wf_side = st.session_state.get(WORKFLOW_LAST_RESULT)
+        if _wf_side:
+            if _wf_side.get("ok"):
+                st.success(_wf_side["message"])
+            else:
+                st.error(_wf_side["message"])
+            with st.expander("workflow ログ", expanded=False):
+                st.text(_wf_side.get("log", ""))
+
         st.caption("🏠 ホームで完結 — データ収集と検証を優先")
-
-if run_btn:
-    venue = venue_code.strip() or None
-    persist_lines: list[str] = []
-    sync_result: dict = {}
-    with st.spinner("workflow 実行中（数分かかります）..."):
-        success, log_text = run_workflow(
-            kaisai_date=kaisai_date,
-            limit=int(limit),
-            with_result=with_result,
-            venue_code=venue,
-            bet_type=bet_type,
-        )
-    print(f"[workflow] done success={success}", flush=True)
-
-    persist_ok = False
-    if success:
-        try:
-            from github_persist import execute_workflow_persist_with_print
-
-            sync_result, persist_lines = execute_workflow_persist_with_print("workflow")
-            persist_ok = bool(sync_result.get("ok")) and sync_result.get("race_count", 0) > 0
-        except Exception as exc:
-            print(f"[persist] error: {exc}", flush=True)
-            persist_lines = [f"永続化エラー: {exc}"]
-    else:
-        persist_lines = ["fetch/report が失敗したため永続化をスキップしました"]
-
-    combined_log = log_text
-    if persist_lines:
-        combined_log = f"{log_text}\n" + "\n".join(
-            f"  {line}" if not line.startswith("---") else line for line in persist_lines
-        )
-
-    workflow_ok = success and persist_ok
-    race_n = int(sync_result.get("race_count") or 0)
-    if workflow_ok:
-        msg = f"workflow 完了 — レース {race_n} 件を保存しました"
-        if sync_result.get("github"):
-            msg += "（GitHub に同期済み）"
-        else:
-            msg += "（persist に保存）"
-    else:
-        msg = "workflow でエラーが発生しました（ログを確認してください）"
-
-    reinforce_authenticated()
-    log_session_state("post-workflow")
-    st.session_state[WORKFLOW_LAST_RESULT] = {
-        "ok": workflow_ok,
-        "message": msg,
-        "log": combined_log,
-        "race_count": race_n,
-        "github": bool(sync_result.get("github")),
-    }
-    invalidate_bundles_cache()
-    st.session_state[DEFER_HEAVY_BUNDLES] = True
-    status = db_status()
-    print(
-        f"[workflow] db after persist: races={status['races']} "
-        f"results={status['results']} learning={status.get('learning', 0)}",
-        flush=True,
-    )
-    # st.rerun() は呼ばない（セッション喪失・二重実行を防ぐ）
 
 _check_deep = st.session_state.pop("system_check_deep", False)
 if _check_deep:
     invalidate_bundles_cache()
+    load_full_bundles_and_restore(bet_type, deep_check=True)
 
-_defer_heavy = st.session_state.pop(DEFER_HEAVY_BUNDLES, False)
+_full_loaded = bool(st.session_state.get(FULL_BUNDLES_LOADED))
 with safe_page("データ読み込み"):
-    if _defer_heavy:
-        print("[app] defer heavy bundle load (post-workflow)", flush=True)
+    if _full_loaded and st.session_state.get("full_bundles_data"):
+        _bundles = st.session_state["full_bundles_data"]
+        _bundle_error = st.session_state.get("full_bundles_error")
+    elif _full_loaded:
+        _bundles, _bundle_error = load_app_bundles_cached(
+            bet_type, deep_check=_check_deep, show_spinner=False
+        )
+        st.session_state["full_bundles_data"] = _bundles
+        st.session_state["full_bundles_error"] = _bundle_error
+    else:
+        print("[app] lightweight mode — minimal bundles", flush=True)
         _bundles = minimal_app_bundles(bet_type)
         _bundle_error = None
-    else:
-        _bundles, _bundle_error = load_app_bundles_cached(bet_type, deep_check=_check_deep)
 
 analyze_text = _bundles["analyze_text"]
 ai_bundle = _bundles["ai_bundle"]
@@ -694,8 +781,10 @@ improvement_bundle = _bundles["improvement_bundle"]
 system_check_bundle = _bundles["system_check_bundle"]
 detect_df = _bundles["detect_df"]
 
+_dashboard_status = db_status() if _full_loaded else get_quick_data_status()
+
 with safe_page("ダッシュボード"):
-    if status["races"] == 0:
+    if _dashboard_status["races"] == 0:
         st.info(NO_DATA_MESSAGE)
     elif _bundle_error:
         st.warning(f"一部データの読み込みに失敗しました: {_bundle_error}")
@@ -726,53 +815,81 @@ home_dashboard: dict = {
 }
 
 with safe_page("メイン初期化"):
-    if "ops_scheduler_started" not in st.session_state:
-        st.session_state.ops_scheduler_started = True
-        start_scheduler_thread(bet_type)
+    if _full_loaded:
+        if "ops_scheduler_started" not in st.session_state:
+            st.session_state.ops_scheduler_started = True
+            start_scheduler_thread(bet_type)
 
-    last_updated = get_last_updated_at(ops_status)
-    ai_status = build_ai_status_summary(
-        recommend=recommend_bundle,
-        battle=battle_bundle,
-        learning=learning_bundle,
-        ml=ml_bundle,
-        validation=validation_bundle,
-        quality=quality_bundle,
-    )
-    data_progress = get_data_progress_bundle(
-        total_races=status["races"],
-        valid_races=quality_bundle.get("valid_races", 0),
-        result_races=status["results"],
-    )
-    if ENABLE_HOME_GOALS:
-        home_dashboard = get_home_dashboard_bundle(
-            bet_type=bet_type,
-            status=status,
+        last_updated = get_last_updated_at(ops_status)
+        ai_status = build_ai_status_summary(
             recommend=recommend_bundle,
             battle=battle_bundle,
-            market=market_bundle,
-            pnl=pnl_bundle,
-            validation=validation_bundle,
-            quality=quality_bundle,
-            ops=ops_status,
-            bankroll=bankroll_bundle,
             learning=learning_bundle,
-            data_progress=data_progress,
-        )
-        today_todos = home_dashboard["todos"]
-    else:
-        home_dashboard = None
-        today_todos = build_stable_todos(
-            status=status,
-            recommend=recommend_bundle,
-            battle=battle_bundle,
-            market=market_bundle,
-            pnl=pnl_bundle,
+            ml=ml_bundle,
             validation=validation_bundle,
             quality=quality_bundle,
-            ops=ops_status,
-            bankroll=bankroll_bundle,
         )
+        data_progress = get_data_progress_bundle(
+            total_races=_dashboard_status["races"],
+            valid_races=quality_bundle.get("valid_races", 0),
+            result_races=_dashboard_status["results"],
+        )
+        if ENABLE_HOME_GOALS:
+            home_dashboard = get_home_dashboard_bundle(
+                bet_type=bet_type,
+                status=_dashboard_status,
+                recommend=recommend_bundle,
+                battle=battle_bundle,
+                market=market_bundle,
+                pnl=pnl_bundle,
+                validation=validation_bundle,
+                quality=quality_bundle,
+                ops=ops_status,
+                bankroll=bankroll_bundle,
+                learning=learning_bundle,
+                data_progress=data_progress,
+            )
+            today_todos = home_dashboard["todos"]
+        else:
+            home_dashboard = None
+            today_todos = build_stable_todos(
+                status=_dashboard_status,
+                recommend=recommend_bundle,
+                battle=battle_bundle,
+                market=market_bundle,
+                pnl=pnl_bundle,
+                validation=validation_bundle,
+                quality=quality_bundle,
+                ops=ops_status,
+                bankroll=bankroll_bundle,
+            )
+    else:
+        last_updated = "—"
+        ai_status = {}
+        data_progress = {
+            "trust": {
+                "level": "insufficient",
+                "label": "未読み込み",
+                "hint": "詳細データを読み込むと AI 信頼度を表示します",
+            }
+        }
+        home_dashboard = None
+        today_todos = [
+            {
+                "text": "詳細データを読み込む（ホーム上部のボタン）",
+                "done": False,
+                "tab": "ホーム",
+            }
+        ]
+        if _dashboard_status["races"] == 0:
+            today_todos.insert(
+                0,
+                {
+                    "text": "サイドバーから workflow を実行してデータを取得",
+                    "done": False,
+                    "tab": "設定",
+                },
+            )
 
 (
     tab_home,
@@ -827,16 +944,18 @@ with tab_home, safe_page("ホーム"):
     st.subheader("ホーム")
     rec = recommend_bundle
     dp = data_progress
-    trust = dp["trust"]
+    trust = dp.get("trust") or {}
 
-    _wf = st.session_state.get(WORKFLOW_LAST_RESULT)
-    if _wf:
-        if _wf.get("ok"):
-            st.success(_wf.get("message", "workflow 完了"))
-        else:
-            st.error(_wf.get("message", "workflow 失敗"))
-        with st.expander("workflow 実行ログ", expanded=False):
-            st.text(_wf.get("log", ""))
+    if not _full_loaded:
+        if st.button(
+            "📥 詳細データを読み込む（分析・推奨・グラフ）",
+            type="primary",
+            use_container_width=True,
+            key="home_load_full_bundles",
+        ):
+            load_full_bundles_and_restore(bet_type)
+            st.rerun()
+        st.caption("件数はサイドバーに表示済みです。詳細は読み込み後に表示されます。")
 
     if not ENABLE_HOME_GOALS:
         st.caption("安定化モード — データ永続化を最優先（月目標UIは検証後に有効化）")
@@ -854,8 +973,8 @@ with tab_home, safe_page("ホーム"):
                     f"（{meta.get('updated_at', '—')}）"
                 )
             st.caption(
-                f"DB: レース {status['races']} / 結果 {status['results']} / "
-                f"学習 {status.get('learning', 0)}"
+                f"DB: レース {_dashboard_status['races']} / 結果 {_dashboard_status['results']} / "
+                f"学習 {_dashboard_status.get('learning', 0)}"
             )
         except Exception:
             pass
@@ -868,31 +987,37 @@ with tab_home, safe_page("ホーム"):
         st.markdown("#### データ件数")
         mobile_metrics(
             [
-                ("レース", status["races"]),
-                ("結果", status["results"]),
-                ("推奨購入", f"{bankroll_bundle.get('recommended_total', 0):,}円"),
+                ("レース", _dashboard_status["races"]),
+                ("結果", _dashboard_status["results"]),
+                (
+                    "推奨購入",
+                    f"{bankroll_bundle.get('recommended_total', 0):,}円"
+                    if _full_loaded
+                    else "—",
+                ),
             ]
         )
 
-        st.markdown("#### 毎日予想")
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            st.metric("狙い目", len(rec.get("targets") or []))
-        with c2:
-            st.metric("見送り", len(battle_bundle.get("skip_candidates") or []))
-        with c3:
-            st.metric("危険人気", len(rec.get("dangerous_popular") or []))
+        if _full_loaded:
+            st.markdown("#### 毎日予想")
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.metric("狙い目", len(rec.get("targets") or []))
+            with c2:
+                st.metric("見送り", len(battle_bundle.get("skip_candidates") or []))
+            with c3:
+                st.metric("危険人気", len(rec.get("dangerous_popular") or []))
 
-        if trust.get("label"):
-            st.caption(f"AI信頼度: {trust['label']}")
+            if trust.get("label"):
+                st.caption(f"AI信頼度: {trust['label']}")
 
-        if rec.get("targets"):
-            for card in rec["targets"][:3]:
-                render_target_card(card)
-        elif rec.get("has_data"):
-            st.info("本日の狙い目はありません")
-        else:
-            st.warning(NO_DATA_MESSAGE)
+            if rec.get("targets"):
+                for card in rec["targets"][:3]:
+                    render_target_card(card)
+            elif rec.get("has_data"):
+                st.info("本日の狙い目はありません")
+            else:
+                st.warning(NO_DATA_MESSAGE)
 
         danger = rec.get("dangerous_popular") or []
         if danger:
@@ -1121,137 +1246,142 @@ with tab_home, safe_page("ホーム"):
         st.caption("※ 判断補助ツールです。自動購入ではありません。")
 
 with tab_rec, safe_page("今日のAIおすすめ"):
-    st.subheader("今日のAIおすすめ")
-    if recommend_bundle.get("has_data"):
-        rec = recommend_bundle
-        if rec["targets"]:
-            for card in rec["targets"][:3]:
-                render_target_card(card)
+    if not prompt_load_bundles_if_needed("今日のAIおすすめ", bet_type) and _full_loaded:
+        st.subheader("今日のAIおすすめ")
+        if recommend_bundle.get("has_data"):
+            rec = recommend_bundle
+            if rec["targets"]:
+                for card in rec["targets"][:3]:
+                    render_target_card(card)
+            else:
+                st.warning("本日の狙い目はありません")
+            if rec["dangerous_popular"]:
+                st.markdown(
+                    '<div class="mobile-section">⚠ 危険な人気（要注意）</div>',
+                    unsafe_allow_html=True,
+                )
+                for card in rec["dangerous_popular"][:3]:
+                    render_danger_card(card)
         else:
-            st.warning("本日の狙い目はありません")
-        if rec["dangerous_popular"]:
-            st.markdown('<div class="mobile-section">⚠ 危険な人気（要注意）</div>', unsafe_allow_html=True)
-            for card in rec["dangerous_popular"][:3]:
-                render_danger_card(card)
-    else:
-        st.warning("データがありません。サイドバー → workflow 実行")
+            st.warning("データがありません。サイドバー → workflow 実行")
 
-    st.divider()
-    st.markdown("#### 詳細一覧")
-    render_ai_recommend_block(
-        recommend_bundle, score_bundle, bet_type, show_skip=True, show_table=True
-    )
-    with st.expander("テキストレポート"):
-        st.text(lines_to_text(recommend_bundle.get("lines", [])))
+        st.divider()
+        st.markdown("#### 詳細一覧")
+        render_ai_recommend_block(
+            recommend_bundle, score_bundle, bet_type, show_skip=True, show_table=True
+        )
+        with st.expander("テキストレポート"):
+            st.text(lines_to_text(recommend_bundle.get("lines", [])))
 
 with tab_battle, safe_page("実戦判定"):
-    st.subheader("実戦判定")
-    st.caption("AIスコア・学習・市場・ライン・直前・品質を総合した買い/見送り判定です。")
+    if not prompt_load_bundles_if_needed("実戦判定", bet_type) and _full_loaded:
+        st.subheader("実戦判定")
+        st.caption("AIスコア・学習・市場・ライン・直前・品質を総合した買い/見送り判定です。")
 
-    bb = battle_bundle
-    if not bb.get("has_data"):
-        st.warning("データがありません。workflow またはデータ収集を実行してください。")
-    else:
-        mobile_metrics(
-            [
-                ("買い候補", len(bb["buy_candidates"])),
-                ("少額候補", len(bb["small_candidates"])),
-                ("見送り", len(bb["skip_candidates"])),
-                ("危険人気", len(bb["dangerous_popular"])),
-            ]
-        )
-        st.caption(
-            f"対象日 {bb['today']} · 推奨合計 {bb.get('total_recommended_yen', 0)}円 "
-            f"（1点{bb.get('base_amount', 100)}円基準）"
-        )
-
-        st.markdown("#### 本日の買い候補")
-        if not bb["buy_candidates"]:
-            st.info("本日の買い候補はありません。")
+        bb = battle_bundle
+        if not bb.get("has_data"):
+            st.warning("データがありません。workflow またはデータ収集を実行してください。")
         else:
-            for card in bb["buy_candidates"][:5]:
-                render_battle_card(card)
-
-        st.markdown("#### 少額候補")
-        if not bb["small_candidates"]:
-            st.caption("少額候補なし")
-        else:
-            for card in bb["small_candidates"][:5]:
-                render_battle_card(card)
-
-        col_check, col_skip = st.columns(2)
-        with col_check:
-            st.markdown("#### 要確認")
-            if not bb["check_candidates"]:
-                st.caption("要確認なし")
-            else:
-                for card in bb["check_candidates"][:3]:
-                    render_battle_card(card)
-        with col_skip:
-            st.markdown("#### 見送り候補")
-            if not bb["skip_candidates"]:
-                st.caption("見送りなし")
-            else:
-                for card in bb["skip_candidates"][:5]:
-                    st.caption(
-                        f"{card['venue_name']} {card['race_no']}R — {card.get('battle_hint', '')}"
-                    )
-
-        st.markdown("#### 危険人気")
-        if not bb["dangerous_popular"]:
-            st.success("危険人気レースは検出されていません。")
-        else:
-            for card in bb["dangerous_popular"][:5]:
-                render_danger_card(card)
-
-        st.markdown("#### 買ってはいけない条件")
-        rules = bb.get("do_not_buy_rules", [])
-        if rules:
-            st.dataframe(
-                pd.DataFrame(rules)[["label", "desc"]],
-                use_container_width=True,
-                hide_index=True,
-            )
-
-        st.markdown("#### 資金配分目安")
-        alloc_rows = []
-        for verdict, guide in bb.get("allocation_guide", {}).items():
-            if verdict == "見送り":
-                continue
-            alloc_rows.append(
-                {
-                    "判定": verdict,
-                    "1レース目安": f"{guide['per_race_yen']}円",
-                    "1点目安": f"{guide['per_combo_yen']}円",
-                    "最大レース": guide["max_races"],
-                    "予算比率": f"{guide['budget_pct']}%",
-                }
-            )
-        if alloc_rows:
-            st.dataframe(pd.DataFrame(alloc_rows), use_container_width=True, hide_index=True)
-
-        with st.expander("全レース一覧"):
-            all_cards = bb.get("all_cards", [])
-            if all_cards:
-                rows = [
-                    {
-                        "競輪場": c["venue_name"],
-                        "R": c["race_no"],
-                        "判定": c["battle_verdict"],
-                        "総合": c["composite_score"],
-                        "推奨円": c["recommended_yen"],
-                        "理由": c.get("battle_hint", ""),
-                    }
-                    for c in all_cards
+            mobile_metrics(
+                [
+                    ("買い候補", len(bb["buy_candidates"])),
+                    ("少額候補", len(bb["small_candidates"])),
+                    ("見送り", len(bb["skip_candidates"])),
+                    ("危険人気", len(bb["dangerous_popular"])),
                 ]
-                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            )
+            st.caption(
+                f"対象日 {bb['today']} · 推奨合計 {bb.get('total_recommended_yen', 0)}円 "
+                f"（1点{bb.get('base_amount', 100)}円基準）"
+            )
 
-        with st.expander("テキストレポート"):
-            st.text(lines_to_text(bb.get("lines", [])))
+            st.markdown("#### 本日の買い候補")
+            if not bb["buy_candidates"]:
+                st.info("本日の買い候補はありません。")
+            else:
+                for card in bb["buy_candidates"][:5]:
+                    render_battle_card(card)
 
-    with st.expander("判定の仕組み"):
-        st.markdown(
-            """
+            st.markdown("#### 少額候補")
+            if not bb["small_candidates"]:
+                st.caption("少額候補なし")
+            else:
+                for card in bb["small_candidates"][:5]:
+                    render_battle_card(card)
+
+            col_check, col_skip = st.columns(2)
+            with col_check:
+                st.markdown("#### 要確認")
+                if not bb["check_candidates"]:
+                    st.caption("要確認なし")
+                else:
+                    for card in bb["check_candidates"][:3]:
+                        render_battle_card(card)
+            with col_skip:
+                st.markdown("#### 見送り候補")
+                if not bb["skip_candidates"]:
+                    st.caption("見送りなし")
+                else:
+                    for card in bb["skip_candidates"][:5]:
+                        st.caption(
+                            f"{card['venue_name']} {card['race_no']}R — {card.get('battle_hint', '')}"
+                        )
+
+            st.markdown("#### 危険人気")
+            if not bb["dangerous_popular"]:
+                st.success("危険人気レースは検出されていません。")
+            else:
+                for card in bb["dangerous_popular"][:5]:
+                    render_danger_card(card)
+
+            st.markdown("#### 買ってはいけない条件")
+            rules = bb.get("do_not_buy_rules", [])
+            if rules:
+                st.dataframe(
+                    pd.DataFrame(rules)[["label", "desc"]],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+            st.markdown("#### 資金配分目安")
+            alloc_rows = []
+            for verdict, guide in bb.get("allocation_guide", {}).items():
+                if verdict == "見送り":
+                    continue
+                alloc_rows.append(
+                    {
+                        "判定": verdict,
+                        "1レース目安": f"{guide['per_race_yen']}円",
+                        "1点目安": f"{guide['per_combo_yen']}円",
+                        "最大レース": guide["max_races"],
+                        "予算比率": f"{guide['budget_pct']}%",
+                    }
+                )
+            if alloc_rows:
+                st.dataframe(pd.DataFrame(alloc_rows), use_container_width=True, hide_index=True)
+
+            with st.expander("全レース一覧"):
+                all_cards = bb.get("all_cards", [])
+                if all_cards:
+                    rows = [
+                        {
+                            "競輪場": c["venue_name"],
+                            "R": c["race_no"],
+                            "判定": c["battle_verdict"],
+                            "総合": c["composite_score"],
+                            "推奨円": c["recommended_yen"],
+                            "理由": c.get("battle_hint", ""),
+                        }
+                        for c in all_cards
+                    ]
+                    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+            with st.expander("テキストレポート"):
+                st.text(lines_to_text(bb.get("lines", [])))
+
+        with st.expander("判定の仕組み"):
+            st.markdown(
+                """
 **総合スコア（100点満点）** に以下を加重合成します。
 
 | 材料 | 比重 |
@@ -1265,221 +1395,226 @@ with tab_battle, safe_page("実戦判定"):
 
 **買ってはいけない条件** に1つでも該当すると見送りになります。  
 資金配分は1点100円基準の目安です。無理のない範囲でご自身の予算に合わせてください。
-            """
-        )
+                """
+            )
 
 with tab_bankroll, safe_page("資金管理"):
-    st.subheader("資金管理")
-    st.caption(f"元手{DEFAULT_BANKROLL:,}円から始める前提で、AI判定に応じた購入金額を提案します。")
+    if prompt_load_bundles_if_needed("資金管理", bet_type):
+        pass
+    elif _full_loaded:
+        st.subheader("資金管理")
+        st.caption(
+            f"元手{DEFAULT_BANKROLL:,}円から始める前提で、AI判定に応じた購入金額を提案します。"
+        )
 
-    bk = bankroll_bundle
-    cfg_initial = bk.get("initial_bankroll", DEFAULT_BANKROLL)
+        bk = bankroll_bundle
+        cfg_initial = bk.get("initial_bankroll", DEFAULT_BANKROLL)
 
-    col_a, col_b, col_c = st.columns(3)
-    with col_a:
-        input_bankroll = st.number_input(
-            "現在資金（円）",
+        col_a, col_b, col_c = st.columns(3)
+        with col_a:
+            input_bankroll = st.number_input(
+                "現在資金（円）",
+                min_value=0,
+                max_value=10_000_000,
+                value=int(bk.get("current_bankroll", DEFAULT_BANKROLL)),
+                step=100,
+                key="bankroll_current",
+            )
+        with col_b:
+            input_max_race = st.number_input(
+                "1レース上限（円）",
+                min_value=100,
+                max_value=100_000,
+                value=int(bk.get("max_per_race", 500)),
+                step=100,
+                key="bankroll_max_race",
+            )
+        with col_c:
+            input_max_daily = st.number_input(
+                "1日上限（円）",
+                min_value=100,
+                max_value=500_000,
+                value=int(bk.get("max_daily", 1500)),
+                step=100,
+                key="bankroll_max_daily",
+            )
+
+        input_monthly_target = st.number_input(
+            "月目標利益（円）",
             min_value=0,
             max_value=10_000_000,
-            value=int(bk.get("current_bankroll", DEFAULT_BANKROLL)),
-            step=100,
-            key="bankroll_current",
-        )
-    with col_b:
-        input_max_race = st.number_input(
-            "1レース上限（円）",
-            min_value=100,
-            max_value=100_000,
-            value=int(bk.get("max_per_race", 500)),
-            step=100,
-            key="bankroll_max_race",
-        )
-    with col_c:
-        input_max_daily = st.number_input(
-            "1日上限（円）",
-            min_value=100,
-            max_value=500_000,
-            value=int(bk.get("max_daily", 1500)),
-            step=100,
-            key="bankroll_max_daily",
+            value=int(get_monthly_target()),
+            step=1000,
+            key="bankroll_monthly_target",
+            help="ホームの月目標進捗・1日あたり必要額・攻め/守る判定に使用",
         )
 
-    input_monthly_target = st.number_input(
-        "月目標利益（円）",
-        min_value=0,
-        max_value=10_000_000,
-        value=int(get_monthly_target()),
-        step=1000,
-        key="bankroll_monthly_target",
-        help="ホームの月目標進捗・1日あたり必要額・攻め/守る判定に使用",
-    )
+        save_bank = st.button("💾 設定を保存", use_container_width=True)
+        if save_bank:
+            set_bankroll_config("current_bankroll", str(int(input_bankroll)))
+            set_bankroll_config("max_per_race", str(int(input_max_race)))
+            set_bankroll_config("max_daily", str(int(input_max_daily)))
+            set_monthly_target(int(input_monthly_target))
+            save_bankroll_snapshot(int(input_bankroll), bk.get("daily_used", 0), "手動更新")
+            st.success("資金設定を保存しました")
+            st.rerun()
 
-    save_bank = st.button("💾 設定を保存", use_container_width=True)
-    if save_bank:
-        set_bankroll_config("current_bankroll", str(int(input_bankroll)))
-        set_bankroll_config("max_per_race", str(int(input_max_race)))
-        set_bankroll_config("max_daily", str(int(input_max_daily)))
-        set_monthly_target(int(input_monthly_target))
-        save_bankroll_snapshot(int(input_bankroll), bk.get("daily_used", 0), "手動更新")
-        st.success("資金設定を保存しました")
-        st.rerun()
-
-    refreshed = get_bankroll_bundle(
-        bet_type,
-        battle_bundle=battle_bundle,
-        current_bankroll=int(input_bankroll),
-        max_per_race=int(input_max_race),
-        max_daily=int(input_max_daily),
-    )
-
-    mobile_metrics(
-        [
-            ("現在資金", f"{refreshed['current_bankroll']:,}円"),
-            ("本日上限", f"{refreshed['max_daily']:,}円"),
-            ("推奨購入", f"{refreshed['recommended_total']:,}円"),
-            ("残り資金", f"{refreshed['remaining_bankroll']:,}円"),
-        ]
-    )
-
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.metric("本日使用済", f"{refreshed['daily_used']:,}円")
-    with c2:
-        st.metric("本日残り上限", f"{refreshed['daily_limit_remaining']:,}円")
-    with c3:
-        st.metric(
-            "連勝/連敗",
-            f"{refreshed['streaks']['win_streak']}/{refreshed['streaks']['lose_streak']}",
-            f"×{refreshed['streak_multiplier']}",
+        refreshed = get_bankroll_bundle(
+            bet_type,
+            battle_bundle=battle_bundle,
+            current_bankroll=int(input_bankroll),
+            max_per_race=int(input_max_race),
+            max_daily=int(input_max_daily),
         )
 
-    if refreshed.get("streak_notes"):
-        st.caption(" / ".join(refreshed["streak_notes"]))
-
-    if refreshed.get("warnings"):
-        st.markdown("#### リスク警告")
-        for w in refreshed["warnings"]:
-            st.warning(w)
-
-    st.markdown("#### S / A / B ランク別の金額目安")
-    rank_rows = []
-    for rank in ("S", "A", "B", "C"):
-        rs = refreshed["rank_stakes"][rank]
-        rank_rows.append(
-            {
-                "ランク": rank,
-                "1レース目安": f"{rs['per_race']}円",
-                "1点目安": f"{rs['per_combo']}円",
-                "説明": rs["label"],
-            }
-        )
-    st.dataframe(pd.DataFrame(rank_rows), use_container_width=True, hide_index=True)
-
-    st.markdown("#### AIスコア別推奨金額")
-    score_rows = [
-        {"AIスコア": "80点以上", "目安": "300円/レース"},
-        {"AIスコア": "65〜79点", "目安": "200円/レース"},
-        {"AIスコア": "50〜64点", "目安": "100円/レース"},
-        {"AIスコア": "49点以下", "目安": "0円（見送り）"},
-    ]
-    st.dataframe(pd.DataFrame(score_rows), use_container_width=True, hide_index=True)
-
-    st.markdown("#### 本日の推奨購入")
-    buy_today = refreshed.get("buy_today", [])
-    if not buy_today:
-        st.info("本日の推奨購入はありません（見送り・危険レース・上限到達）。")
-    else:
-        show = pd.DataFrame(
+        mobile_metrics(
             [
-                {
-                    "競輪場": a["venue_name"],
-                    "R": a["race_no"],
-                    "ランク": a.get("ev_rank"),
-                    "判定": a.get("battle_verdict"),
-                    "推奨円": a["recommended_yen"],
-                    "1点": a["per_combo_yen"],
-                    "理由": a.get("stake_reason"),
-                }
-                for a in buy_today
+                ("現在資金", f"{refreshed['current_bankroll']:,}円"),
+                ("本日上限", f"{refreshed['max_daily']:,}円"),
+                ("推奨購入", f"{refreshed['recommended_total']:,}円"),
+                ("残り資金", f"{refreshed['remaining_bankroll']:,}円"),
             ]
         )
-        st.dataframe(show, use_container_width=True, hide_index=True)
 
-    st.markdown("#### 全レース配分")
-    all_alloc = refreshed.get("allocations", [])
-    if all_alloc:
-        st.dataframe(
-            pd.DataFrame(
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.metric("本日使用済", f"{refreshed['daily_used']:,}円")
+        with c2:
+            st.metric("本日残り上限", f"{refreshed['daily_limit_remaining']:,}円")
+        with c3:
+            st.metric(
+                "連勝/連敗",
+                f"{refreshed['streaks']['win_streak']}/{refreshed['streaks']['lose_streak']}",
+                f"×{refreshed['streak_multiplier']}",
+            )
+
+        if refreshed.get("streak_notes"):
+            st.caption(" / ".join(refreshed["streak_notes"]))
+
+        if refreshed.get("warnings"):
+            st.markdown("#### リスク警告")
+            for w in refreshed["warnings"]:
+                st.warning(w)
+
+        st.markdown("#### S / A / B ランク別の金額目安")
+        rank_rows = []
+        for rank in ("S", "A", "B", "C"):
+            rs = refreshed["rank_stakes"][rank]
+            rank_rows.append(
+                {
+                    "ランク": rank,
+                    "1レース目安": f"{rs['per_race']}円",
+                    "1点目安": f"{rs['per_combo']}円",
+                    "説明": rs["label"],
+                }
+            )
+        st.dataframe(pd.DataFrame(rank_rows), use_container_width=True, hide_index=True)
+
+        st.markdown("#### AIスコア別推奨金額")
+        score_rows = [
+            {"AIスコア": "80点以上", "目安": "300円/レース"},
+            {"AIスコア": "65〜79点", "目安": "200円/レース"},
+            {"AIスコア": "50〜64点", "目安": "100円/レース"},
+            {"AIスコア": "49点以下", "目安": "0円（見送り）"},
+        ]
+        st.dataframe(pd.DataFrame(score_rows), use_container_width=True, hide_index=True)
+
+        st.markdown("#### 本日の推奨購入")
+        buy_today = refreshed.get("buy_today", [])
+        if not buy_today:
+            st.info("本日の推奨購入はありません（見送り・危険レース・上限到達）。")
+        else:
+            show = pd.DataFrame(
                 [
                     {
                         "競輪場": a["venue_name"],
                         "R": a["race_no"],
-                        "危険": "⚠" if a.get("danger_popular") else "",
+                        "ランク": a.get("ev_rank"),
+                        "判定": a.get("battle_verdict"),
                         "推奨円": a["recommended_yen"],
+                        "1点": a["per_combo_yen"],
                         "理由": a.get("stake_reason"),
                     }
-                    for a in all_alloc
+                    for a in buy_today
                 ]
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
-
-    st.markdown("#### 資金推移")
-    fig = refreshed.get("fig_trend")
-    if fig is not None:
-        st.plotly_chart(fig, use_container_width=True, key="bankroll_fig_trend")
-
-    with st.expander("CLI出力"):
-        st.text(lines_to_text(build_bankroll_lines(refreshed)))
-
-    with st.expander("資金管理ルール"):
-        st.markdown(
-            f"""
-- **初期元手**: {cfg_initial:,}円
-- **1レース上限**: 資金の10%または設定上限の小さい方
-- **1日上限**: 既定1,500円（資金の30%目安）
-- **連敗2**: 70% / **連敗3**: 50% / **連敗5**: 30%に自動減額
-- **連勝3以上**: 最大+15%まで（急増しない）
-- **危険人気・見送り**: 0円
-
-実戦判定タブの結果と連動しています。
-            """
-        )
-
-with tab_validation, safe_page("検証レポート"):
-    st.subheader("検証レポート")
-    st.caption("AIおすすめ・実戦判定・資金管理の成績を日次/週次/月次で自動検証します。")
-
-    vb = validation_bundle if isinstance(validation_bundle, dict) else empty_validation_report(bet_type)
-
-    col_run, col_save = st.columns(2)
-    with col_run:
-        if st.button("🔄 検証を更新", type="primary", use_container_width=True):
-            with st.spinner("検証中..."):
-                run_daily_validation(bet_type)
-            st.success("検証レポートを更新しました")
-            st.rerun()
-    with col_save:
-        if st.button("💾 レポート保存", use_container_width=True):
-            path = save_validation_report(
-                bet_type,
-                battle_bundle=battle_bundle,
-                bankroll_plan=bankroll_bundle,
             )
-            st.success(f"保存: {path.name}")
+            st.dataframe(show, use_container_width=True, hide_index=True)
 
-    def _period_metrics(period: dict | None, label: str) -> None:
-        s = (period or {}).get("summary") or {}
-        st.markdown(f"**{label}**")
-        settled = int(s.get("settled") or 0)
-        profit = int(s.get("total_profit") or 0)
-        recovery = s.get("recovery_rate")
-        hit = s.get("hit_rate")
-        mobile_metrics(
-            [
-                ("収支", f"{profit:,}円"),
-                ("回収率", f"{recovery if recovery is not None else 0}%"),
+        st.markdown("#### 全レース配分")
+        all_alloc = refreshed.get("allocations", [])
+        if all_alloc:
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "競輪場": a["venue_name"],
+                            "R": a["race_no"],
+                            "危険": "⚠" if a.get("danger_popular") else "",
+                            "推奨円": a["recommended_yen"],
+                            "理由": a.get("stake_reason"),
+                        }
+                        for a in all_alloc
+                    ]
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        st.markdown("#### 資金推移")
+        fig = refreshed.get("fig_trend")
+        if fig is not None:
+            st.plotly_chart(fig, use_container_width=True, key="bankroll_fig_trend")
+
+        with st.expander("CLI出力"):
+            st.text(lines_to_text(build_bankroll_lines(refreshed)))
+
+        with st.expander("資金管理ルール"):
+            st.markdown(
+                f"""
+    - **初期元手**: {cfg_initial:,}円
+    - **1レース上限**: 資金の10%または設定上限の小さい方
+    - **1日上限**: 既定1,500円（資金の30%目安）
+    - **連敗2**: 70% / **連敗3**: 50% / **連敗5**: 30%に自動減額
+    - **連勝3以上**: 最大+15%まで（急増しない）
+    - **危険人気・見送り**: 0円
+
+    実戦判定タブの結果と連動しています。
+                """
+            )
+
+    with tab_validation, safe_page("検証レポート"):
+        st.subheader("検証レポート")
+        st.caption("AIおすすめ・実戦判定・資金管理の成績を日次/週次/月次で自動検証します。")
+
+        vb = validation_bundle if isinstance(validation_bundle, dict) else empty_validation_report(bet_type)
+
+        col_run, col_save = st.columns(2)
+        with col_run:
+            if st.button("🔄 検証を更新", type="primary", use_container_width=True):
+                with st.spinner("検証中..."):
+                    run_daily_validation(bet_type)
+                st.success("検証レポートを更新しました")
+                st.rerun()
+        with col_save:
+            if st.button("💾 レポート保存", use_container_width=True):
+                path = save_validation_report(
+                    bet_type,
+                    battle_bundle=battle_bundle,
+                    bankroll_plan=bankroll_bundle,
+                )
+                st.success(f"保存: {path.name}")
+
+        def _period_metrics(period: dict | None, label: str) -> None:
+            s = (period or {}).get("summary") or {}
+            st.markdown(f"**{label}**")
+            settled = int(s.get("settled") or 0)
+            profit = int(s.get("total_profit") or 0)
+            recovery = s.get("recovery_rate")
+            hit = s.get("hit_rate")
+            mobile_metrics(
+                [
+                    ("収支", f"{profit:,}円"),
+                    ("回収率", f"{recovery if recovery is not None else 0}%"),
                 ("的中率", f"{hit if hit is not None else 0}%"),
                 ("件数", settled),
             ]
