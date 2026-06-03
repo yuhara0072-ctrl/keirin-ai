@@ -649,6 +649,12 @@ if run_btn:
     }
     invalidate_bundles_cache()
     st.session_state[DEFER_HEAVY_BUNDLES] = True
+    status = db_status()
+    print(
+        f"[workflow] db after persist: races={status['races']} "
+        f"results={status['results']} learning={status.get('learning', 0)}",
+        flush=True,
+    )
     # st.rerun() は呼ばない（セッション喪失・二重実行を防ぐ）
 
 _check_deep = st.session_state.pop("system_check_deep", False)
@@ -835,18 +841,22 @@ with tab_home, safe_page("ホーム"):
     if not ENABLE_HOME_GOALS:
         st.caption("安定化モード — データ永続化を最優先（月目標UIは検証後に有効化）")
         try:
-            from pathlib import Path as _Path
-            import json as _json
+            from github_persist import get_persist_meta_summary
 
-            meta_path = _Path("persist/meta.json")
-            if meta_path.exists():
-                meta = _json.loads(meta_path.read_text(encoding="utf-8"))
+            meta = get_persist_meta_summary()
+            if meta:
                 st.info(
-                    f"永続化: races={meta.get('race_count', 0)} "
+                    f"永続化 ({meta.get('_source', '—')}): "
+                    f"races={meta.get('race_count', 0)} "
                     f"results={meta.get('result_count', 0)} "
                     f"learning={meta.get('learning_count', 0)} "
+                    f"branch={meta.get('persist_branch', '—')} "
                     f"（{meta.get('updated_at', '—')}）"
                 )
+            st.caption(
+                f"DB: レース {status['races']} / 結果 {status['results']} / "
+                f"学習 {status.get('learning', 0)}"
+            )
         except Exception:
             pass
 

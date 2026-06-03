@@ -222,6 +222,7 @@ def build_snapshot_files(
         "version": PERSIST_VERSION,
         "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "db_path": str(DB_PATH),
+        "persist_branch": GITHUB_PERSIST_BRANCH,
         "race_count": len(races),
         "result_count": len(results),
         "learning_count": len(patterns),
@@ -440,8 +441,16 @@ def _ordered_file_names(files: dict[str, Any]) -> list[str]:
 def download_github_snapshot() -> Optional[dict[str, Any]]:
     if not is_github_enabled():
         return None
+    print(
+        f"[persist] download_github_snapshot branch={GITHUB_PERSIST_BRANCH} repo={GITHUB_REPO}",
+        flush=True,
+    )
     meta_raw, _ = _github_get_file("meta.json")
     if not meta_raw:
+        print(
+            f"[persist] meta.json not found on branch={GITHUB_PERSIST_BRANCH}",
+            flush=True,
+        )
         return None
     files: dict[str, Any] = {"meta.json": json.loads(meta_raw)}
     list_url = f"https://api.github.com/repos/{GITHUB_REPO.strip()}/contents/{PERSIST_DIR.name}"
@@ -463,6 +472,12 @@ def download_github_snapshot() -> Optional[dict[str, Any]]:
         raw, _ = _github_get_file(name)
         if raw:
             files[name] = json.loads(raw)
+    race_n = len(files.get("races.json") or [])
+    print(
+        f"[persist] downloaded files={[k for k in files if k.endswith('.json')]} "
+        f"races={race_n} branch={GITHUB_PERSIST_BRANCH}",
+        flush=True,
+    )
     return files
 
 
@@ -711,23 +726,38 @@ def workflow_persist_and_sync(reason: str = "workflow") -> tuple[dict, list[str]
 
 
 def _load_best_snapshot() -> tuple[Optional[dict], str]:
-    snapshot = None
-    source = ""
+    """復元用スナップショット。GitHub data ブランチを正とし、main 同梱の persist/ より優先する。"""
+    gh_snapshot: Optional[dict[str, Any]] = None
+    gh_races = 0
     if is_github_enabled():
         try:
-            snapshot = download_github_snapshot()
-            source = "github"
+            gh_snapshot = download_github_snapshot()
+            if gh_snapshot:
+                gh_races = len(gh_snapshot.get("races.json") or [])
         except Exception as exc:
-            print(f"[persist] restore github download error: {exc}", flush=True)
-            snapshot = None
+            print(
+                f"[persist] restore github download error "
+                f"branch={GITHUB_PERSIST_BRANCH}: {exc}",
+                flush=True,
+            )
+            gh_snapshot = None
+
     local = load_local_snapshot()
+    local_races = len((local or {}).get("races.json") or []) if local else 0
     if local:
-        local_races = len(local.get("races.json") or [])
-        gh_races = len((snapshot or {}).get("races.json") or [])
-        if snapshot is None or local_races >= gh_races:
-            snapshot = local
-            source = "local" if source != "github" else "local+github"
-    return snapshot, source
+        print(f"[persist] local snapshot races={local_races}", flush=True)
+
+    # Render イメージは main からビルドされるため、同梱 persist/ は古い。data ブランチを優先。
+    if gh_snapshot and gh_races > 0:
+        return gh_snapshot, f"github:{GITHUB_PERSIST_BRANCH}"
+
+    if local and local_races > 0:
+        return local, "local"
+
+    if gh_snapshot:
+        return gh_snapshot, f"github:{GITHUB_PERSIST_BRANCH}:empty-races"
+
+    return None, ""
 
 
 def ensure_data_restored() -> dict:
@@ -761,10 +791,16 @@ def ensure_data_restored() -> dict:
 
     snapshot, source = _load_best_snapshot()
     if not snapshot:
+        print(
+            f"[persist] restore failed: no_snapshot branch={GITHUB_PERSIST_BRANCH} "
+            f"github_enabled={is_github_enabled()}",
+            flush=True,
+        )
         return {
             "ok": False,
             "skipped": True,
             "reason": "no_snapshot",
+            "persist_branch": GITHUB_PERSIST_BRANCH,
             "race_count": 0,
             "result_count": 0,
             "learning_count": 0,
@@ -804,6 +840,28 @@ def ensure_data_restored() -> dict:
             "result_count": 0,
             "learning_count": 0,
         }
+
+
+def get_persist_meta_summary() -> Optional[dict[str, Any]]:
+    """UI 表示用 — meta.json（GitHub data ブランチ優先）"""
+    if is_github_enabled():
+        try:
+            meta_raw, _ = _github_get_file("meta.json")
+            if meta_raw:
+                meta = json.loads(meta_raw)
+                meta["_source"] = f"github:{GITHUB_PERSIST_BRANCH}"
+                return meta
+        except Exception as exc:
+            print(f"[persist] meta read error: {exc}", flush=True)
+    meta_path = _persist_path("meta.json")
+    if meta_path.exists():
+        try:
+            meta = _read_json_file(meta_path)
+            meta["_source"] = "local"
+            return meta
+        except Exception:
+            pass
+    return None
 
 
 def restore_if_needed() -> Optional[dict]:
