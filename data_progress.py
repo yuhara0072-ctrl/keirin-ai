@@ -99,3 +99,18 @@ def get_data_progress_bundle(
         "milestones": milestones,
         "trust": trust,
     }
+
+
+def get_light_data_progress_bundle(
+    *,
+    total_races: int = 0,
+    result_races: int = 0,
+    valid_races: int | None = None,
+) -> dict:
+    """詳細バンドル未読み込み時 — DB 件数だけでホームを表示"""
+    valid = int(valid_races if valid_races is not None else result_races)
+    return get_data_progress_bundle(
+        total_races=int(total_races),
+        valid_races=valid,
+        result_races=int(result_races),
+    )

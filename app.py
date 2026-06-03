@@ -205,7 +205,7 @@ from config import (
     ENABLE_HOME_GOALS,
     TARGET_RACES,
 )
-from data_progress import get_data_progress_bundle
+from data_progress import get_data_progress_bundle, get_light_data_progress_bundle
 from home_dashboard import build_stable_todos, get_home_dashboard_bundle
 from monthly_goal import get_monthly_target, set_monthly_target
 from db import ensure_db, get_db_status, init_db
@@ -781,7 +781,9 @@ improvement_bundle = _bundles["improvement_bundle"]
 system_check_bundle = _bundles["system_check_bundle"]
 detect_df = _bundles["detect_df"]
 
-_dashboard_status = db_status() if _full_loaded else get_quick_data_status()
+_dashboard_status = db_status()
+if _dashboard_status.get("races", 0) == 0 and not _full_loaded:
+    _dashboard_status = get_quick_data_status()
 
 with safe_page("ダッシュボード"):
     if _dashboard_status["races"] == 0:
@@ -865,13 +867,26 @@ with safe_page("メイン初期化"):
             )
     else:
         last_updated = "—"
-        ai_status = {}
-        data_progress = {
-            "trust": {
-                "level": "insufficient",
-                "label": "未読み込み",
-                "hint": "詳細データを読み込むと AI 信頼度を表示します",
-            }
+        ai_status = {
+            "targets": 0,
+            "buy": "—",
+            "skip": "—",
+            "patterns": "—",
+            "week_recovery": None,
+            "week_settled": 0,
+            "valid_races": 0,
+            "valid_pct": 0,
+        }
+        data_progress = get_light_data_progress_bundle(
+            total_races=_dashboard_status["races"],
+            result_races=_dashboard_status["results"],
+            valid_races=_dashboard_status["results"],
+        )
+        data_progress["trust"] = {
+            **data_progress.get("trust", {}),
+            "label": data_progress["trust"].get("label", "—")
+            + "（詳細未読み込み）",
+            "hint": "詳細データを読み込むと AI 信頼度・有効レース数が更新されます",
         }
         home_dashboard = None
         today_todos = [
@@ -989,6 +1004,7 @@ with tab_home, safe_page("ホーム"):
             [
                 ("レース", _dashboard_status["races"]),
                 ("結果", _dashboard_status["results"]),
+                ("オッズ", _dashboard_status.get("odds") or "—"),
                 (
                     "推奨購入",
                     f"{bankroll_bundle.get('recommended_total', 0):,}円"
@@ -997,6 +1013,9 @@ with tab_home, safe_page("ホーム"):
                 ),
             ]
         )
+        trust_dp = data_progress.get("trust") or {}
+        if trust_dp.get("label"):
+            st.caption(f"AI信頼度: {trust_dp['label']}")
 
         if _full_loaded:
             st.markdown("#### 毎日予想")
@@ -1201,33 +1220,40 @@ with tab_home, safe_page("ホーム"):
             st.text(ops_result.get("log_text", ""))
 
     with st.expander("データ収集進捗・詳細ステータス", expanded=False):
-        dp = data_progress
+        dp = data_progress or {}
         st.metric(
             "保存レース数",
-            f"{dp['saved_total']:,} 件",
-            f"有効 {dp['saved_valid']:,} / 結果 {dp['saved_results']:,}",
+            f"{dp.get('saved_total', _dashboard_status.get('races', 0)):,} 件",
+            f"有効 {dp.get('saved_valid', 0):,} / 結果 {dp.get('saved_results', _dashboard_status.get('results', 0)):,}",
         )
-        for m in dp["milestones"]:
-            label = f"{m['target']:,}件"
-            if m["done"]:
-                st.progress(1.0, text=f"{label} 達成 ({m['current']:,}/{m['target']:,})")
+        for m in dp.get("milestones") or []:
+            label = f"{m.get('target', 0):,}件"
+            if m.get("done"):
+                st.progress(
+                    1.0,
+                    text=f"{label} 達成 ({m.get('current', 0):,}/{m.get('target', 0):,})",
+                )
             else:
                 st.progress(
-                    m["ratio"],
-                    text=f"{label} {m['current']:,}/{m['target']:,} ({m['pct']}%)",
+                    m.get("ratio", 0.0),
+                    text=f"{label} {m.get('current', 0):,}/{m.get('target', 0):,} ({m.get('pct', 0)}%)",
                 )
 
     with st.expander("詳細ステータス"):
         mobile_metrics(
             [
                 ("最終更新", last_updated[:16] if last_updated != "—" else "—"),
-                ("買い候補", ai_status["buy"]),
-                ("学習パターン", ai_status["patterns"]),
-                ("今週回収率", (
-                    f"{ai_status['week_recovery']}%"
-                    if ai_status["week_recovery"] is not None and ai_status["week_settled"]
-                    else "—"
-                )),
+                ("買い候補", ai_status.get("buy", "—")),
+                ("学習パターン", ai_status.get("patterns", "—")),
+                (
+                    "今週回収率",
+                    (
+                        f"{ai_status['week_recovery']}%"
+                        if ai_status.get("week_recovery") is not None
+                        and ai_status.get("week_settled")
+                        else "—"
+                    ),
+                ),
             ]
         )
 
