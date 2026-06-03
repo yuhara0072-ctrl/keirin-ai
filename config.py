@@ -53,3 +53,11 @@ DATA_MILESTONES = (TARGET_RACES, TARGET_RACES_MID, TARGET_RACES_FULL)
 
 # 資金管理の初期元手
 DEFAULT_BANKROLL = 5000
+
+# 安定化優先: 0=ホームは軽量UIのみ / 1=月目標・推奨購入額・攻め守りを表示
+ENABLE_HOME_GOALS = os.environ.get("KEIRIN_ENABLE_HOME_GOALS", "0").strip() in (
+    "1",
+    "true",
+    "True",
+    "yes",
+)

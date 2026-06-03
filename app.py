@@ -190,9 +190,15 @@ from auth import (
     require_authentication,
 )
 from ui_guard import safe_call, safe_page, safe_plotly_chart
-from config import DAILY_FETCH_LIMIT, DATA_DIR, DEFAULT_BANKROLL, TARGET_RACES
+from config import (
+    DAILY_FETCH_LIMIT,
+    DATA_DIR,
+    DEFAULT_BANKROLL,
+    ENABLE_HOME_GOALS,
+    TARGET_RACES,
+)
 from data_progress import get_data_progress_bundle
-from home_dashboard import get_home_dashboard_bundle
+from home_dashboard import build_stable_todos, get_home_dashboard_bundle
 from monthly_goal import get_monthly_target, set_monthly_target
 from db import ensure_db, get_db_status, init_db
 from detect_anomaly import detect_all
@@ -431,6 +437,19 @@ def run_workflow(
         log.append("STEP 2-4/4: 分析・検知・レポート保存...")
         path = save_report(bet_type=bet_type)
         log.append(f"  → 保存: {path}")
+
+        log.append("STEP 5/5: データ永続化（local + GitHub）...")
+        try:
+            from github_persist import execute_workflow_persist_with_print
+
+            sync_result, persist_lines = execute_workflow_persist_with_print("workflow")
+            log.extend(persist_lines)
+            if sync_result.get("race_count", 0) == 0:
+                return False, "\n".join(log)
+        except Exception as exc:
+            log.append(f"  永続化エラー: {exc}")
+            return False, "\n".join(log)
+
         return True, "\n".join(log)
     except Exception as e:
         log.append(f"エラー: {e}")
@@ -651,21 +670,35 @@ with safe_page("メイン初期化"):
         valid_races=quality_bundle.get("valid_races", 0),
         result_races=status["results"],
     )
-    home_dashboard = get_home_dashboard_bundle(
-        bet_type=bet_type,
-        status=status,
-        recommend=recommend_bundle,
-        battle=battle_bundle,
-        market=market_bundle,
-        pnl=pnl_bundle,
-        validation=validation_bundle,
-        quality=quality_bundle,
-        ops=ops_status,
-        bankroll=bankroll_bundle,
-        learning=learning_bundle,
-        data_progress=data_progress,
-    )
-    today_todos = home_dashboard["todos"]
+    if ENABLE_HOME_GOALS:
+        home_dashboard = get_home_dashboard_bundle(
+            bet_type=bet_type,
+            status=status,
+            recommend=recommend_bundle,
+            battle=battle_bundle,
+            market=market_bundle,
+            pnl=pnl_bundle,
+            validation=validation_bundle,
+            quality=quality_bundle,
+            ops=ops_status,
+            bankroll=bankroll_bundle,
+            learning=learning_bundle,
+            data_progress=data_progress,
+        )
+        today_todos = home_dashboard["todos"]
+    else:
+        home_dashboard = None
+        today_todos = build_stable_todos(
+            status=status,
+            recommend=recommend_bundle,
+            battle=battle_bundle,
+            market=market_bundle,
+            pnl=pnl_bundle,
+            validation=validation_bundle,
+            quality=quality_bundle,
+            ops=ops_status,
+            bankroll=bankroll_bundle,
+        )
 
 (
     tab_home,
@@ -718,147 +751,210 @@ with tab_settings:
 
 with tab_home, safe_page("ホーム"):
     st.subheader("ホーム")
-    st.caption("毎日予想 → 学習 → 資金管理 → 月目標達成")
-
-    hd = home_dashboard
-    monthly = hd["monthly"]
-    pred = hd["prediction"]
-    learn = hd["learning_snap"]
-    bk = hd["bankroll"]
-    trust = pred["trust"]
     rec = recommend_bundle
+    dp = data_progress
+    trust = dp["trust"]
 
-    with st.expander("このアプリの4つの柱", expanded=False):
-        for pillar in hd["pillars"]:
-            st.markdown(f"**{pillar['title']}**")
-            for item in pillar["items"]:
-                st.markdown(f"- {item}")
+    if not ENABLE_HOME_GOALS:
+        st.caption("安定化モード — データ永続化を最優先（月目標UIは検証後に有効化）")
+        try:
+            from pathlib import Path as _Path
+            import json as _json
 
-    st.markdown("#### 月目標進捗")
-    m1, m2, m3, m4 = st.columns(4)
-    with m1:
-        st.metric("月目標", f"{monthly['target_profit']:,}円")
-    with m2:
-        st.metric(
-            "今月収支",
-            f"{monthly['current_profit']:+,}円",
-            delta=f"回収{monthly['month_stats']['recovery_rate']}%"
-            if monthly["month_stats"]["settled"]
-            else None,
-        )
-    with m3:
-        rem = monthly["remaining"]
-        st.metric(
-            "目標まで残り",
-            "達成済み" if monthly["achieved"] else f"{rem:,}円",
-        )
-    with m4:
-        st.metric("1日あたり必要", f"{monthly['daily_required']:,}円")
-
-    stance = monthly["stance"]
-    if stance == "攻める":
-        st.success(f"今日の方針: **{stance}** — {monthly['stance_reason']}")
-    elif stance == "守る":
-        st.warning(f"今日の方針: **{stance}** — {monthly['stance_reason']}")
-    else:
-        st.info(f"今日の方針: **{stance}** — {monthly['stance_reason']}")
-    st.progress(
-        monthly["progress_ratio"],
-        text=f"{monthly['month_label']} {monthly['progress_pct']}%",
-    )
-
-    st.markdown("#### 推奨購入額")
-    b1, b2, b3, b4 = st.columns(4)
-    with b1:
-        st.metric("現在資金", f"{bk.get('current_bankroll', 0):,}円")
-    with b2:
-        st.metric("本日の推奨合計", f"{bk.get('recommended_total', 0):,}円")
-    with b3:
-        st.metric("1レース上限", f"{bk.get('max_per_race', 0):,}円")
-    with b4:
-        st.metric(
-            "本日残り枠",
-            f"{bk.get('daily_limit_remaining', 0):,}円",
-            delta=f"使用 {bk.get('daily_used', 0):,}円",
-        )
-    if bk.get("warnings"):
-        for w in bk["warnings"][:3]:
-            st.caption(f"⚠ {w}")
-    buy_today = bk.get("buy_today") or []
-    if buy_today:
-        st.caption("推奨が高いレース（上位3件）")
-        for row in buy_today[:3]:
-            st.markdown(
-                f"- **{row.get('venue_name')} {row.get('race_no')}R** "
-                f"{row.get('recommended_yen', 0):,}円 "
-                f"（{row.get('stake_reason', '')}）"
-            )
-    else:
-        st.caption("本日の推奨購入は0円 — 見送り・危険レース中心")
-
-    st.markdown("#### 毎日予想")
-    p1, p2, p3 = st.columns(3)
-    with p1:
-        st.metric("狙い目", f"{pred['target_count']} 件")
-    with p2:
-        st.metric("見送り", f"{pred['skip_count']} 件")
-    with p3:
-        st.metric("危険人気", f"{pred['danger_count']} 件")
-
-    if trust.get("label"):
-        if trust["level"] == "insufficient":
-            st.error(f"AI信頼度: **{trust['label']}**")
-        elif trust["level"] == "reference":
-            st.warning(f"AI信頼度: **{trust['label']}**")
-        elif trust["level"] == "verifiable":
-            st.info(f"AI信頼度: **{trust['label']}**")
-        else:
-            st.success(f"AI信頼度: **{trust['label']}**")
-        st.caption(trust.get("hint", ""))
-
-    if pred["targets"]:
-        for card in pred["targets"][:3]:
-            render_target_card(card)
-    elif pred["has_data"]:
-        st.info("本日の狙い目はありません — 見送り中心の日です")
-    else:
-        st.warning(NO_DATA_MESSAGE)
-
-    if pred["danger_preview"]:
-        st.caption("危険人気（要確認）")
-        for card in pred["danger_preview"][:3]:
-            render_danger_card(card)
-
-    if pred["skip_preview"]:
-        with st.expander(f"見送りレース（{pred['skip_count']}件）", expanded=False):
-            for card in pred["skip_preview"]:
-                st.markdown(
-                    f"- {card.get('venue_name')} {card.get('race_no')}R "
-                    f"AI{card.get('ai_total_score', '—')} "
-                    f"— {card.get('battle_hint') or card.get('verdict', '見送り')}"
+            meta_path = _Path("persist/meta.json")
+            if meta_path.exists():
+                meta = _json.loads(meta_path.read_text(encoding="utf-8"))
+                st.info(
+                    f"永続化: races={meta.get('race_count', 0)} "
+                    f"results={meta.get('result_count', 0)} "
+                    f"learning={meta.get('learning_count', 0)} "
+                    f"（{meta.get('updated_at', '—')}）"
                 )
+        except Exception:
+            pass
 
-    st.markdown("#### 学習（今月の振り返り）")
-    if learn["has_data"]:
-        st.caption(
-            f"確定 {learn['month_settled']} 件 / "
-            f"回収 {learn['month_recovery'] or '—'}% / "
-            f"的中 {learn['month_hit_rate'] or '—'}% / "
-            f"学習条件 {learn['learning_count']} 件"
+        st.markdown("#### 今日やること")
+        for todo in today_todos:
+            icon = "✅" if todo["done"] else "📌"
+            st.markdown(f"{icon} **{todo['text']}** → `{todo['tab']}` タブ")
+
+        st.markdown("#### データ件数")
+        mobile_metrics(
+            [
+                ("レース", status["races"]),
+                ("結果", status["results"]),
+                ("推奨購入", f"{bankroll_bundle.get('recommended_total', 0):,}円"),
+            ]
         )
-        if learn["strong_conditions"]:
-            st.markdown("**強い条件:** " + " · ".join(learn["strong_conditions"]))
-        if learn["weak_conditions"]:
-            st.markdown("**弱い条件:** " + " · ".join(learn["weak_conditions"]))
+
+        st.markdown("#### 毎日予想")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.metric("狙い目", len(rec.get("targets") or []))
+        with c2:
+            st.metric("見送り", len(battle_bundle.get("skip_candidates") or []))
+        with c3:
+            st.metric("危険人気", len(rec.get("dangerous_popular") or []))
+
+        if trust.get("label"):
+            st.caption(f"AI信頼度: {trust['label']}")
+
+        if rec.get("targets"):
+            for card in rec["targets"][:3]:
+                render_target_card(card)
+        elif rec.get("has_data"):
+            st.info("本日の狙い目はありません")
+        else:
+            st.warning(NO_DATA_MESSAGE)
+
+        danger = rec.get("dangerous_popular") or []
+        if danger:
+            for card in danger[:3]:
+                render_danger_card(card)
+
+        st.divider()
     else:
-        st.caption("学習データなし — workflow（結果付き）後に自動反映されます")
+        st.caption("毎日予想 → 学習 → 資金管理 → 月目標達成")
 
-    st.markdown("#### 今日やること")
-    for todo in today_todos:
-        icon = "✅" if todo["done"] else "📌"
-        st.markdown(f"{icon} **{todo['text']}** → `{todo['tab']}` タブ")
+    if ENABLE_HOME_GOALS:
+        hd = home_dashboard
+        monthly = hd["monthly"]
+        pred = hd["prediction"]
+        learn = hd["learning_snap"]
+        bk = hd["bankroll"]
+        trust = pred["trust"]
 
-    st.divider()
+        with st.expander("このアプリの4つの柱", expanded=False):
+            for pillar in hd["pillars"]:
+                st.markdown(f"**{pillar['title']}**")
+                for item in pillar["items"]:
+                    st.markdown(f"- {item}")
+
+        st.markdown("#### 月目標進捗")
+        m1, m2, m3, m4 = st.columns(4)
+        with m1:
+            st.metric("月目標", f"{monthly['target_profit']:,}円")
+        with m2:
+            st.metric(
+                "今月収支",
+                f"{monthly['current_profit']:+,}円",
+                delta=f"回収{monthly['month_stats']['recovery_rate']}%"
+                if monthly["month_stats"]["settled"]
+                else None,
+            )
+        with m3:
+            rem = monthly["remaining"]
+            st.metric(
+                "目標まで残り",
+                "達成済み" if monthly["achieved"] else f"{rem:,}円",
+            )
+        with m4:
+            st.metric("1日あたり必要", f"{monthly['daily_required']:,}円")
+
+        stance = monthly["stance"]
+        if stance == "攻める":
+            st.success(f"今日の方針: **{stance}** — {monthly['stance_reason']}")
+        elif stance == "守る":
+            st.warning(f"今日の方針: **{stance}** — {monthly['stance_reason']}")
+        else:
+            st.info(f"今日の方針: **{stance}** — {monthly['stance_reason']}")
+        st.progress(
+            monthly["progress_ratio"],
+            text=f"{monthly['month_label']} {monthly['progress_pct']}%",
+        )
+
+        st.markdown("#### 推奨購入額")
+        b1, b2, b3, b4 = st.columns(4)
+        with b1:
+            st.metric("現在資金", f"{bk.get('current_bankroll', 0):,}円")
+        with b2:
+            st.metric("本日の推奨合計", f"{bk.get('recommended_total', 0):,}円")
+        with b3:
+            st.metric("1レース上限", f"{bk.get('max_per_race', 0):,}円")
+        with b4:
+            st.metric(
+                "本日残り枠",
+                f"{bk.get('daily_limit_remaining', 0):,}円",
+                delta=f"使用 {bk.get('daily_used', 0):,}円",
+            )
+        if bk.get("warnings"):
+            for w in bk["warnings"][:3]:
+                st.caption(f"⚠ {w}")
+        buy_today = bk.get("buy_today") or []
+        if buy_today:
+            st.caption("推奨が高いレース（上位3件）")
+            for row in buy_today[:3]:
+                st.markdown(
+                    f"- **{row.get('venue_name')} {row.get('race_no')}R** "
+                    f"{row.get('recommended_yen', 0):,}円 "
+                    f"（{row.get('stake_reason', '')}）"
+                )
+        else:
+            st.caption("本日の推奨購入は0円 — 見送り・危険レース中心")
+
+        st.markdown("#### 毎日予想")
+        p1, p2, p3 = st.columns(3)
+        with p1:
+            st.metric("狙い目", f"{pred['target_count']} 件")
+        with p2:
+            st.metric("見送り", f"{pred['skip_count']} 件")
+        with p3:
+            st.metric("危険人気", f"{pred['danger_count']} 件")
+
+        if trust.get("label"):
+            if trust["level"] == "insufficient":
+                st.error(f"AI信頼度: **{trust['label']}**")
+            elif trust["level"] == "reference":
+                st.warning(f"AI信頼度: **{trust['label']}**")
+            elif trust["level"] == "verifiable":
+                st.info(f"AI信頼度: **{trust['label']}**")
+            else:
+                st.success(f"AI信頼度: **{trust['label']}**")
+            st.caption(trust.get("hint", ""))
+
+        if pred["targets"]:
+            for card in pred["targets"][:3]:
+                render_target_card(card)
+        elif pred["has_data"]:
+            st.info("本日の狙い目はありません — 見送り中心の日です")
+        else:
+            st.warning(NO_DATA_MESSAGE)
+
+        if pred["danger_preview"]:
+            st.caption("危険人気（要確認）")
+            for card in pred["danger_preview"][:3]:
+                render_danger_card(card)
+
+        if pred["skip_preview"]:
+            with st.expander(f"見送りレース（{pred['skip_count']}件）", expanded=False):
+                for card in pred["skip_preview"]:
+                    st.markdown(
+                        f"- {card.get('venue_name')} {card.get('race_no')}R "
+                        f"AI{card.get('ai_total_score', '—')} "
+                        f"— {card.get('battle_hint') or card.get('verdict', '見送り')}"
+                    )
+
+        st.markdown("#### 学習（今月の振り返り）")
+        if learn["has_data"]:
+            st.caption(
+                f"確定 {learn['month_settled']} 件 / "
+                f"回収 {learn['month_recovery'] or '—'}% / "
+                f"的中 {learn['month_hit_rate'] or '—'}% / "
+                f"学習条件 {learn['learning_count']} 件"
+            )
+            if learn["strong_conditions"]:
+                st.markdown("**強い条件:** " + " · ".join(learn["strong_conditions"]))
+            if learn["weak_conditions"]:
+                st.markdown("**弱い条件:** " + " · ".join(learn["weak_conditions"]))
+        else:
+            st.caption("学習データなし — workflow（結果付き）後に自動反映されます")
+
+        st.markdown("#### 今日やること")
+        for todo in today_todos:
+            icon = "✅" if todo["done"] else "📌"
+            st.markdown(f"{icon} **{todo['text']}** → `{todo['tab']}` タブ")
+
+        st.divider()
 
     # --- ① 自動実行 ---
     st.markdown("#### ① 今日の自動実行")

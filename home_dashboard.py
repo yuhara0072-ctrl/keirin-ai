@@ -7,6 +7,43 @@ from typing import Optional
 
 from monthly_goal import get_monthly_goal_bundle
 
+def build_stable_todos(
+    *,
+    status: dict,
+    recommend: dict,
+    battle: dict,
+    market: dict,
+    pnl: dict,
+    validation: dict,
+    quality: dict,
+    ops: dict,
+    bankroll: dict,
+) -> list[dict]:
+    """安定化モード用の軽量タスク一覧（月目標UIなし）"""
+    return build_today_todos(
+        status=status,
+        recommend=recommend,
+        battle=battle,
+        market=market,
+        pnl=pnl,
+        validation=validation,
+        quality=quality,
+        ops=ops,
+        monthly={
+            "stance": "",
+            "remaining": 0,
+            "achieved": True,
+            "daily_required": 0,
+        },
+        bankroll=bankroll,
+        prediction={
+            "target_count": len(recommend.get("targets") or []),
+            "danger_count": len(recommend.get("dangerous_popular") or []),
+            "skip_count": len(battle.get("skip_candidates") or []),
+        },
+    )
+
+
 APP_PILLARS = [
     {
         "title": "1. 毎日予想",

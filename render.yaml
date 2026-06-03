@@ -22,3 +22,5 @@ services:
         sync: false
       - key: KEIRIN_AUTH_PASSWORD
         sync: false
+      - key: KEIRIN_ENABLE_HOME_GOALS
+        value: "0"

@@ -70,6 +70,7 @@ def logout() -> None:
     st.session_state[SESSION_AUTHENTICATED] = False
     st.session_state[SESSION_USERNAME] = ""
     st.session_state[SESSION_DB_BOOTSTRAPPED] = False
+    # ログアウトで DB は消さない（persist / GitHub が正）
     for key in list(st.session_state.keys()):
         if str(key).startswith("bundles_"):
             st.session_state.pop(key, None)
@@ -90,13 +91,6 @@ def _race_count_safe() -> int:
 
 def run_login_bootstrap() -> dict:
     """ログイン直後の DB 初期化・GitHub 復元（例外でも認証は維持）"""
-    if st.session_state.get(SESSION_DB_BOOTSTRAPPED):
-        count = _race_count_safe()
-        print("[auth] restore start (already bootstrapped)", flush=True)
-        print("[auth] restore result: skipped", flush=True)
-        print(f"[auth] db race count: {count}", flush=True)
-        return {"ok": True, "restore": None, "race_count": count, "skipped": True}
-
     print("[auth] restore start", flush=True)
     outcome: dict = {"ok": True, "restore": None, "race_count": 0, "error": None}
     try:
@@ -110,15 +104,23 @@ def run_login_bootstrap() -> dict:
     restore = outcome.get("restore")
     print(f"[auth] restore result: {restore if restore is not None else 'none'}", flush=True)
     print(f"[auth] db race count: {outcome.get('race_count', 0)}", flush=True)
-    st.session_state[SESSION_DB_BOOTSTRAPPED] = True
+
+    # DB にデータが入ったときだけ「準備完了」とする（空のまま再試行可能に）
+    if outcome.get("race_count", 0) > 0 or (restore or {}).get("skipped"):
+        st.session_state[SESSION_DB_BOOTSTRAPPED] = True
     return outcome
 
 
 def ensure_db_ready() -> None:
-    """認証済みセッションで DB を一度だけ準備（ログイン以外の再実行用）"""
-    if st.session_state.get(SESSION_DB_BOOTSTRAPPED):
-        return
-    run_login_bootstrap()
+    """認証済みセッションで DB を準備。Render 再起動で DB だけ空になった場合も復元"""
+    count = _race_count_safe()
+    if count == 0:
+        st.session_state.pop(SESSION_DB_BOOTSTRAPPED, None)
+    if not st.session_state.get(SESSION_DB_BOOTSTRAPPED):
+        run_login_bootstrap()
+    elif count == 0:
+        print("[auth] db empty after bootstrapped — retry restore", flush=True)
+        run_login_bootstrap()
 
 
 def render_login_page() -> bool:

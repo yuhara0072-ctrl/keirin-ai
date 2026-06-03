@@ -71,7 +71,7 @@ def table_exists(conn: sqlite3.Connection, name: str) -> bool:
 
 
 def safe_table_count(conn: sqlite3.Connection, table: str) -> int:
-    allowed = {"races", "results", "odds", "entries"}
+    allowed = {"races", "results", "odds", "entries", "learned_patterns"}
     if table not in allowed or not table_exists(conn, table):
         return 0
     return int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
@@ -87,12 +87,13 @@ def get_db_status() -> dict:
                 "races": safe_table_count(conn, "races"),
                 "results": safe_table_count(conn, "results"),
                 "odds": safe_table_count(conn, "odds"),
+                "learning": safe_table_count(conn, "learned_patterns"),
                 "ready": table_exists(conn, "races"),
             }
         finally:
             conn.close()
     except Exception:
-        return {"races": 0, "results": 0, "odds": 0, "ready": False}
+        return {"races": 0, "results": 0, "odds": 0, "learning": 0, "ready": False}
 
 
 def bootstrap_database() -> dict:
@@ -101,6 +102,8 @@ def bootstrap_database() -> dict:
         "ok": True,
         "restore": None,
         "race_count": 0,
+        "result_count": 0,
+        "learning_count": 0,
         "error": None,
     }
     try:
@@ -112,9 +115,13 @@ def bootstrap_database() -> dict:
         return outcome
 
     try:
-        from github_persist import restore_if_needed
+        from github_persist import ensure_data_restored
 
-        outcome["restore"] = restore_if_needed()
+        restore_out = ensure_data_restored()
+        outcome["restore"] = restore_out
+        if restore_out.get("error"):
+            outcome["ok"] = False
+            outcome["error"] = f"restore: {restore_out['error']}"
     except Exception as exc:
         outcome["ok"] = False
         outcome["error"] = f"restore: {exc}"
@@ -123,6 +130,8 @@ def bootstrap_database() -> dict:
         conn = get_connection()
         try:
             outcome["race_count"] = safe_table_count(conn, "races")
+            outcome["result_count"] = safe_table_count(conn, "results")
+            outcome["learning_count"] = safe_table_count(conn, "learned_patterns")
         finally:
             conn.close()
     except Exception as exc:

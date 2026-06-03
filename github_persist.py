@@ -263,6 +263,8 @@ def _import_table(conn, table: str, records: list[dict]) -> None:
     if not records:
         return
     df = pd.DataFrame(records)
+    if "id" in df.columns:
+        df = df.drop(columns=["id"])
     df.to_sql(table, conn, if_exists="append", index=False)
 
 
@@ -294,13 +296,18 @@ def import_snapshot(files: dict[str, Any]) -> dict:
         migrate_learning_table(conn)
         conn.commit()
 
-        meta = files.get("meta.json") or {}
+        from db import safe_table_count, table_exists
+
         return {
-            "race_count": meta.get("race_count", len(files.get("races.json") or [])),
-            "result_count": meta.get("result_count", len(files.get("results.json") or [])),
-            "learning_count": meta.get(
-                "learning_count", len(files.get("learned_patterns.json") or [])
-            ),
+            "race_count": safe_table_count(conn, "races")
+            if table_exists(conn, "races")
+            else 0,
+            "result_count": safe_table_count(conn, "results")
+            if table_exists(conn, "results")
+            else 0,
+            "learning_count": safe_table_count(conn, "learned_patterns")
+            if table_exists(conn, "learned_patterns")
+            else 0,
         }
     finally:
         conn.close()
@@ -345,8 +352,41 @@ def _github_get_file(name: str) -> tuple[Optional[str], Optional[str]]:
     return content, body.get("sha")
 
 
+def _guard_against_empty_races_overwrite(name: str, content: str) -> None:
+    """GitHub 上の既存 races.json を空配列で上書きしない（データ消失防止）"""
+    if name != "races.json":
+        return
+    try:
+        new_rows = json.loads(content)
+    except json.JSONDecodeError:
+        return
+    if new_rows:
+        return
+    existing_raw, _ = _github_get_file(name)
+    if not existing_raw:
+        return
+    try:
+        old_rows = json.loads(existing_raw)
+    except json.JSONDecodeError:
+        return
+    if old_rows:
+        raise RuntimeError(
+            f"データ保護: 空の races.json で既存 {len(old_rows)} 件を上書きしません"
+        )
+
+
 def _github_put_file(name: str, content: str, message: str) -> dict[str, Any]:
     """GitHub Contents API で1ファイル更新。status_code 等を返す"""
+    if is_github_enabled() and name == "races.json":
+        try:
+            _guard_against_empty_races_overwrite(name, content)
+        except RuntimeError as exc:
+            return {
+                "ok": False,
+                "file": name,
+                "status_code": None,
+                "error_message": str(exc),
+            }
     url = f"https://api.github.com/repos/{GITHUB_REPO.strip()}/contents/{PERSIST_DIR.name}/{name}"
     try:
         _, sha = _github_get_file(name)
@@ -486,9 +526,10 @@ def sync_to_github(
     }
 
     if not is_github_enabled():
-        result["ok"] = False
+        result["ok"] = exported_races > 0
         result["message"] = "local only (GITHUB_TOKEN / GITHUB_REPO 未設定)"
         result["races_json_put"]["error_message"] = result["message"]
+        result["races_json_put"]["skipped"] = True
         _emit_log(log_fn, result["message"])
         return result
 
@@ -662,16 +703,7 @@ def workflow_persist_and_sync(reason: str = "workflow") -> tuple[dict, list[str]
     return execute_workflow_persist_with_print(reason)
 
 
-def restore_if_needed() -> Optional[dict]:
-    from db import get_connection, safe_table_count, table_exists
-
-    conn = get_connection()
-    try:
-        if table_exists(conn, "races") and safe_table_count(conn, "races") > 0:
-            return {"skipped": True, "reason": "db_not_empty"}
-    finally:
-        conn.close()
-
+def _load_best_snapshot() -> tuple[Optional[dict], str]:
     snapshot = None
     source = ""
     if is_github_enabled():
@@ -679,26 +711,96 @@ def restore_if_needed() -> Optional[dict]:
             snapshot = download_github_snapshot()
             source = "github"
         except Exception as exc:
-            print(f"[auth] restore github download error: {exc}", flush=True)
+            print(f"[persist] restore github download error: {exc}", flush=True)
             snapshot = None
-    if snapshot is None:
-        snapshot = load_local_snapshot()
-        source = "local" if snapshot else ""
+    local = load_local_snapshot()
+    if local:
+        local_races = len(local.get("races.json") or [])
+        gh_races = len((snapshot or {}).get("races.json") or [])
+        if snapshot is None or local_races >= gh_races:
+            snapshot = local
+            source = "local" if source != "github" else "local+github"
+    return snapshot, source
 
+
+def ensure_data_restored() -> dict:
+    """DB が空のとき persist/GitHub から復元（Render 再起動・再ログイン後）"""
+    from db import get_connection, init_db, safe_table_count, table_exists
+
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    init_db()
+
+    conn = get_connection()
+    try:
+        db_races = safe_table_count(conn, "races") if table_exists(conn, "races") else 0
+        db_results = safe_table_count(conn, "results") if table_exists(conn, "results") else 0
+        db_learning = (
+            safe_table_count(conn, "learned_patterns")
+            if table_exists(conn, "learned_patterns")
+            else 0
+        )
+    finally:
+        conn.close()
+
+    if db_races > 0:
+        return {
+            "ok": True,
+            "skipped": True,
+            "reason": "db_not_empty",
+            "race_count": db_races,
+            "result_count": db_results,
+            "learning_count": db_learning,
+        }
+
+    snapshot, source = _load_best_snapshot()
     if not snapshot:
-        return {"skipped": True, "reason": "no_snapshot"}
+        return {
+            "ok": False,
+            "skipped": True,
+            "reason": "no_snapshot",
+            "race_count": 0,
+            "result_count": 0,
+            "learning_count": 0,
+        }
 
     races = snapshot.get("races.json") or []
     if not races:
-        return {"skipped": True, "reason": "empty_races_json"}
+        return {
+            "ok": False,
+            "skipped": True,
+            "reason": "empty_races_json",
+            "race_count": 0,
+            "result_count": 0,
+            "learning_count": 0,
+        }
 
     try:
         stats = import_snapshot(snapshot)
         stats["source"] = source
+        stats["ok"] = True
+        stats["skipped"] = False
+        print(
+            f"[persist] restore ok: races={stats.get('race_count')} "
+            f"results={stats.get('result_count')} "
+            f"learning={stats.get('learning_count')} source={source}",
+            flush=True,
+        )
         return stats
     except Exception as exc:
-        print(f"[auth] restore import error: {exc}", flush=True)
-        return {"ok": False, "error": str(exc), "source": source}
+        print(f"[persist] restore import error: {exc}", flush=True)
+        return {
+            "ok": False,
+            "skipped": False,
+            "error": str(exc),
+            "source": source,
+            "race_count": 0,
+            "result_count": 0,
+            "learning_count": 0,
+        }
+
+
+def restore_if_needed() -> Optional[dict]:
+    return ensure_data_restored()
 
 
 def maybe_sync(reason: str) -> dict:
