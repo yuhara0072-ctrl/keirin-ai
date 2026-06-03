@@ -694,6 +694,12 @@ def execute_workflow_persist_with_print(reason: str = "workflow") -> tuple[dict,
         log_print(f"エラーメッセージ: {err}")
 
     log_print("=== workflow persist end ===")
+    print(
+        f"[persist] done ok={sync_result.get('ok')} "
+        f"races={sync_result.get('race_count', export_races)} "
+        f"github={sync_result.get('github')}",
+        flush=True,
+    )
     ui_lines.extend(format_workflow_persist_detail(sync_result))
     return sync_result, ui_lines
 

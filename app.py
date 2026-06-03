@@ -184,8 +184,12 @@ from ui_mobile import (
     render_target_card,
 )
 from auth import (
+    DEFER_HEAVY_BUNDLES,
+    WORKFLOW_LAST_RESULT,
     ensure_db_ready,
     init_auth_session,
+    log_session_state,
+    reinforce_authenticated,
     render_logout_control,
     require_authentication,
 )
@@ -413,6 +417,53 @@ def load_app_bundles_safe(bet_type: str, *, deep_check: bool = False) -> tuple[d
         return empty, str(e)
 
 
+def minimal_app_bundles(bet_type: str) -> dict:
+    """workflow 直後用 — 全バンドル読み込みを避け OOM / プロセス再起動を防ぐ"""
+    score = empty_score_bundle()
+    rec = empty_recommend_bundle()
+    battle = empty_battle_bundle()
+    validation = empty_validation_bundle()
+    try:
+        ops = get_ops_status(bet_type, fast=True, targets_count=0)
+    except Exception:
+        ops = {"last_finished_at": "—", "auto_enabled": False}
+    try:
+        backup = get_backup_bundle()
+    except Exception:
+        backup = {"backups": [], "latest_at": None, "db_size_bytes": 0}
+    return {
+        "analyze_text": "",
+        "ai_bundle": {"overall": {}, "metrics": pd.DataFrame(), "venue_trends": pd.DataFrame()},
+        "score_bundle": score,
+        "recommend_bundle": rec,
+        "ops_status": ops,
+        "charts_bundle": {"has_data": False},
+        "line_bundle": {"has_data": False},
+        "market_bundle": {"has_data": False, "needs_poll_hint": False},
+        "learning_bundle": {"has_data": False, "learning_count": 0, "patterns": pd.DataFrame()},
+        "pre_race_bundle": {},
+        "ml_bundle": {"has_model": False},
+        "notify_bundle": {
+            "candidate_count": 0,
+            "high_score": [],
+            "danger_popular": [],
+            "odds_surge": [],
+            "candidates": [],
+        },
+        "backup_bundle": backup,
+        "pnl_bundle": {"summary_actual": {"pending": 0}},
+        "collect_bundle": {"remaining": TARGET_RACES},
+        "quality_bundle": {"valid_races": 0, "valid_pct": 0, "total_races": 0},
+        "advanced_bundle": {"patterns": pd.DataFrame()},
+        "battle_bundle": battle,
+        "bankroll_bundle": {},
+        "validation_bundle": validation,
+        "improvement_bundle": {"top5_proposals": pd.DataFrame(), "weaknesses": [], "strengths": []},
+        "system_check_bundle": {"overall_status": "warn", "checks_df": pd.DataFrame()},
+        "detect_df": pd.DataFrame(),
+    }
+
+
 def run_workflow(
     kaisai_date: str,
     limit: int,
@@ -437,19 +488,7 @@ def run_workflow(
         log.append("STEP 2-4/4: 分析・検知・レポート保存...")
         path = save_report(bet_type=bet_type)
         log.append(f"  → 保存: {path}")
-
-        log.append("STEP 5/5: データ永続化（local + GitHub）...")
-        try:
-            from github_persist import execute_workflow_persist_with_print
-
-            sync_result, persist_lines = execute_workflow_persist_with_print("workflow")
-            log.extend(persist_lines)
-            if sync_result.get("race_count", 0) == 0:
-                return False, "\n".join(log)
-        except Exception as exc:
-            log.append(f"  永続化エラー: {exc}")
-            return False, "\n".join(log)
-
+        log.append("STEP 4/4 完了（永続化は UI 側で 1 回のみ実行）")
         return True, "\n".join(log)
     except Exception as e:
         log.append(f"エラー: {e}")
@@ -558,6 +597,7 @@ with safe_page("サイドバー"):
 if run_btn:
     venue = venue_code.strip() or None
     persist_lines: list[str] = []
+    sync_result: dict = {}
     with st.spinner("workflow 実行中（数分かかります）..."):
         success, log_text = run_workflow(
             kaisai_date=kaisai_date,
@@ -566,14 +606,20 @@ if run_btn:
             venue_code=venue,
             bet_type=bet_type,
         )
-    print("[workflow] fetch/report 完了 — GitHub永続化を開始", flush=True)
-    try:
-        from github_persist import execute_workflow_persist_with_print
+    print(f"[workflow] done success={success}", flush=True)
 
-        _, persist_lines = execute_workflow_persist_with_print("workflow")
-    except Exception as exc:
-        print(f"[github_persist] FATAL: {exc}", flush=True)
-        persist_lines = [f"永続化エラー: {exc}"]
+    persist_ok = False
+    if success:
+        try:
+            from github_persist import execute_workflow_persist_with_print
+
+            sync_result, persist_lines = execute_workflow_persist_with_print("workflow")
+            persist_ok = bool(sync_result.get("ok")) and sync_result.get("race_count", 0) > 0
+        except Exception as exc:
+            print(f"[persist] error: {exc}", flush=True)
+            persist_lines = [f"永続化エラー: {exc}"]
+    else:
+        persist_lines = ["fetch/report が失敗したため永続化をスキップしました"]
 
     combined_log = log_text
     if persist_lines:
@@ -581,20 +627,42 @@ if run_btn:
             f"  {line}" if not line.startswith("---") else line for line in persist_lines
         )
 
-    if success:
-        st.success("workflow が完了しました")
-        invalidate_bundles_cache()
+    workflow_ok = success and persist_ok
+    race_n = int(sync_result.get("race_count") or 0)
+    if workflow_ok:
+        msg = f"workflow 完了 — レース {race_n} 件を保存しました"
+        if sync_result.get("github"):
+            msg += "（GitHub に同期済み）"
+        else:
+            msg += "（persist に保存）"
     else:
-        st.error("workflow でエラーが発生しました")
-    with st.expander("実行ログ", expanded=True):
-        st.text(combined_log)
+        msg = "workflow でエラーが発生しました（ログを確認してください）"
+
+    reinforce_authenticated()
+    log_session_state("post-workflow")
+    st.session_state[WORKFLOW_LAST_RESULT] = {
+        "ok": workflow_ok,
+        "message": msg,
+        "log": combined_log,
+        "race_count": race_n,
+        "github": bool(sync_result.get("github")),
+    }
+    invalidate_bundles_cache()
+    st.session_state[DEFER_HEAVY_BUNDLES] = True
+    # st.rerun() は呼ばない（セッション喪失・二重実行を防ぐ）
 
 _check_deep = st.session_state.pop("system_check_deep", False)
 if _check_deep:
     invalidate_bundles_cache()
 
+_defer_heavy = st.session_state.pop(DEFER_HEAVY_BUNDLES, False)
 with safe_page("データ読み込み"):
-    _bundles, _bundle_error = load_app_bundles_cached(bet_type, deep_check=_check_deep)
+    if _defer_heavy:
+        print("[app] defer heavy bundle load (post-workflow)", flush=True)
+        _bundles = minimal_app_bundles(bet_type)
+        _bundle_error = None
+    else:
+        _bundles, _bundle_error = load_app_bundles_cached(bet_type, deep_check=_check_deep)
 
 analyze_text = _bundles["analyze_text"]
 ai_bundle = _bundles["ai_bundle"]
@@ -754,6 +822,15 @@ with tab_home, safe_page("ホーム"):
     rec = recommend_bundle
     dp = data_progress
     trust = dp["trust"]
+
+    _wf = st.session_state.get(WORKFLOW_LAST_RESULT)
+    if _wf:
+        if _wf.get("ok"):
+            st.success(_wf.get("message", "workflow 完了"))
+        else:
+            st.error(_wf.get("message", "workflow 失敗"))
+        with st.expander("workflow 実行ログ", expanded=False):
+            st.text(_wf.get("log", ""))
 
     if not ENABLE_HOME_GOALS:
         st.caption("安定化モード — データ永続化を最優先（月目標UIは検証後に有効化）")

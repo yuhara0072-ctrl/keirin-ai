@@ -11,6 +11,8 @@ import streamlit as st
 SESSION_AUTHENTICATED = "authenticated"
 SESSION_USERNAME = "auth_username"
 SESSION_DB_BOOTSTRAPPED = "db_bootstrapped"
+WORKFLOW_LAST_RESULT = "workflow_last_result"
+DEFER_HEAVY_BUNDLES = "defer_heavy_bundles"
 
 
 def init_auth_session() -> None:
@@ -48,6 +50,20 @@ def credentials_configured() -> bool:
 
 def is_authenticated() -> bool:
     return st.session_state.get(SESSION_AUTHENTICATED) is True
+
+
+def reinforce_authenticated() -> None:
+    """workflow 等の長処理後も認証フラグを維持"""
+    init_auth_session()
+    if st.session_state.get(SESSION_AUTHENTICATED) is True:
+        st.session_state[SESSION_AUTHENTICATED] = True
+
+
+def log_session_state(context: str = "") -> None:
+    """Render Logs 用 — 認証状態を明示"""
+    flag = is_authenticated()
+    suffix = f" ctx={context}" if context else ""
+    print(f"[session] authenticated {flag}{suffix}", flush=True)
 
 
 def authenticate(username: str, password: str) -> bool:
@@ -168,7 +184,7 @@ password = "your_password"
     if authenticate(username, password):
         print("[auth] auth success", flush=True)
         run_login_bootstrap()
-        print(f"[auth] session authenticated: {is_authenticated()}", flush=True)
+        log_session_state("login")
         st.success("ログインしました。アプリを読み込んでいます…")
         return True
 
@@ -179,8 +195,11 @@ password = "your_password"
 def require_authentication() -> bool:
     init_auth_session()
     if is_authenticated():
+        log_session_state("require-auth")
         return True
     if render_login_page():
+        if is_authenticated():
+            log_session_state("require-auth-after-login")
         return is_authenticated()
     return False
 
