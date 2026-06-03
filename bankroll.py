@@ -100,6 +100,7 @@ DEFAULT_CONFIG = {
     "max_per_race": str(DEFAULT_MAX_PER_RACE),
     "max_daily": str(DEFAULT_MAX_DAILY),
     "base_unit": str(DEFAULT_BASE_UNIT),
+    "monthly_target_profit": "10000",
 }
 
 
