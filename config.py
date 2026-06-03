@@ -14,7 +14,8 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 PERSIST_DIR = PROJECT_ROOT / "persist"
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "").strip()
-GITHUB_PERSIST_BRANCH = os.environ.get("GITHUB_PERSIST_BRANCH", "main").strip() or "main"
+# 永続化は data ブランチのみ（main へ push すると Render Auto Deploy が走るため）
+GITHUB_PERSIST_BRANCH = os.environ.get("GITHUB_PERSIST_BRANCH", "data").strip() or "data"
 GITHUB_REQUEST_TIMEOUT = int(os.environ.get("GITHUB_REQUEST_TIMEOUT", "60"))
 
 

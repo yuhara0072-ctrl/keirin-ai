@@ -16,6 +16,8 @@ services:
         value: "3.12.8"
       - key: GITHUB_REPO
         value: yuhara0072-ctrl/keirin-ai
+      - key: GITHUB_PERSIST_BRANCH
+        value: data
       - key: GITHUB_TOKEN
         sync: false
       - key: KEIRIN_AUTH_USERNAME

@@ -102,7 +102,7 @@ streamlit run app.py --server.port $PORT --server.address 0.0.0.0
 | `KEIRIN_AUTH_PASSWORD` | ログイン用パスワード |
 | `GITHUB_TOKEN` | GitHub PAT（`repo` 権限）— データ永続化 |
 | `GITHUB_REPO` | リポジトリ名（例: `yuhara0072-ctrl/keirin-ai`） |
-| `GITHUB_PERSIST_BRANCH` | 保存ブランチ（省略時 `main`） |
+| `GITHUB_PERSIST_BRANCH` | 保存ブランチ（省略時 `data`。`main` へ push すると Render が再デプロイします） |
 
 **Render での設定手順**
 

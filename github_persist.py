@@ -638,6 +638,7 @@ def execute_workflow_persist_with_print(reason: str = "workflow") -> tuple[dict,
         ui_lines.append(msg)
 
     log_print("=== workflow persist start ===")
+    log_print(f"永続化ブランチ: {GITHUB_PERSIST_BRANCH} (Render deploy は main のみ)")
 
     db_races = _db_race_count()
     log_print(f"DB race件数: {db_races}")
