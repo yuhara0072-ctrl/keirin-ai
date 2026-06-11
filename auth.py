@@ -1,10 +1,12 @@
-"""Streamlit ログイン認証（Render 環境変数 / Secrets 対応）"""
+"""Streamlit ログイン認証（Render 環境変数 / Secrets 対応 + Cookie 永続化）"""
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import os
 import time
+from datetime import datetime, timedelta
 from typing import Optional
 
 import streamlit as st
@@ -17,6 +19,18 @@ DEFER_HEAVY_BUNDLES = "defer_heavy_bundles"
 LOGIN_FLASH_UNTIL = "login_flash_until"
 PENDING_DB_RESTORE = "pending_db_restore"
 FULL_BUNDLES_LOADED = "full_bundles_loaded"
+AUTH_COOKIE_NAME = "keirin_auth"
+AUTH_COOKIE_AWAIT = "auth_cookie_await"
+
+COOKIE_DAYS = max(1, int(os.environ.get("KEIRIN_AUTH_COOKIE_DAYS", "30")))
+
+
+@st.cache_resource
+def get_cookie_manager():
+    """ブラウザ Cookie 読み書き（プロセス再起動後も認証復元用）"""
+    import extra_streamlit_components as stx
+
+    return stx.CookieManager(key="keirin_auth_cookie_mgr")
 
 
 def init_auth_session() -> None:
@@ -46,6 +60,114 @@ def _load_credentials() -> Optional[tuple[str, str]]:
     if username and password:
         return str(username), str(password)
     return None
+
+
+def _auth_secret() -> bytes:
+    """Cookie 署名用シークレット（未設定時はパスワードから導出 — 既存 env のみでも動作）"""
+    secret = os.environ.get("KEIRIN_AUTH_COOKIE_SECRET", "").strip()
+    if not secret:
+        try:
+            auth = st.secrets.get("auth")
+            if auth and auth.get("cookie_secret"):
+                secret = str(auth["cookie_secret"]).strip()
+        except (AttributeError, KeyError, FileNotFoundError, TypeError):
+            pass
+    if secret:
+        return secret.encode("utf-8")
+    creds = _load_credentials()
+    if creds:
+        return hashlib.sha256(creds[1].encode("utf-8")).digest()
+    return b"keirin-dev-insecure-change-me"
+
+
+def create_auth_token(username: str) -> str:
+    """HMAC 署名付き認証トークン（改ざん検知 + 有効期限）"""
+    user = username.strip()
+    exp = int(time.time()) + COOKIE_DAYS * 86400
+    payload = f"{user}|{exp}"
+    sig = hmac.new(_auth_secret(), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    return f"{payload}|{sig}"
+
+
+def verify_auth_token(token: str) -> Optional[str]:
+    """Cookie トークンを検証し、有効ならユーザー名を返す"""
+    if not token or not isinstance(token, str):
+        return None
+    try:
+        payload, sig = token.rsplit("|", 1)
+        expected = hmac.new(_auth_secret(), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(sig, expected):
+            return None
+        username, exp_str = payload.rsplit("|", 1)
+        if int(exp_str) < time.time():
+            return None
+        creds = _load_credentials()
+        if creds and not hmac.compare_digest(username.strip(), creds[0].strip()):
+            return None
+        return username.strip()
+    except (ValueError, TypeError):
+        return None
+
+
+def persist_auth_cookie(username: str) -> None:
+    """認証成功時 — 署名付きトークンを Cookie に保存"""
+    try:
+        token = create_auth_token(username)
+        cm = get_cookie_manager()
+        cm.set(
+            AUTH_COOKIE_NAME,
+            token,
+            expires_at=datetime.now() + timedelta(days=COOKIE_DAYS),
+            key="persist_auth_cookie",
+        )
+        print("[auth] auth cookie saved", flush=True)
+    except Exception as exc:
+        print(f"[auth] cookie save error: {exc}", flush=True)
+
+
+def clear_auth_cookie() -> None:
+    """明示ログアウト時 — Cookie を削除"""
+    try:
+        cm = get_cookie_manager()
+        if cm.get(AUTH_COOKIE_NAME):
+            cm.delete(AUTH_COOKIE_NAME)
+        print("[auth] auth cookie cleared", flush=True)
+    except Exception as exc:
+        print(f"[auth] cookie clear error: {exc}", flush=True)
+
+
+def try_restore_session_from_cookie() -> bool | None:
+    """
+    session_state 喪失後に Cookie から認証を復元。
+    Returns:
+        True  — 復元成功
+        False — Cookie なし / 無効
+        None  — CookieManager 未準備（次 rerun 待ち）
+    """
+    if is_authenticated():
+        return True
+
+    cm = get_cookie_manager()
+    cookies = cm.get_all()
+    if cookies is None:
+        return None
+
+    token = cookies.get(AUTH_COOKIE_NAME)
+    if not token:
+        return False
+
+    username = verify_auth_token(token)
+    if not username:
+        clear_auth_cookie()
+        return False
+
+    st.session_state[SESSION_AUTHENTICATED] = True
+    st.session_state[SESSION_USERNAME] = username
+    ensure_db_schema_only()
+    mark_pending_restore()
+    st.session_state.pop(FULL_BUNDLES_LOADED, None)
+    print(f"[auth] cookie restore ok user={username}", flush=True)
+    return True
 
 
 def credentials_configured() -> bool:
@@ -81,6 +203,7 @@ def authenticate(username: str, password: str) -> bool:
     if user_ok and pwd_ok:
         st.session_state[SESSION_AUTHENTICATED] = True
         st.session_state[SESSION_USERNAME] = username.strip()
+        persist_auth_cookie(username.strip())
         return True
     return False
 
@@ -93,6 +216,7 @@ def logout() -> None:
     st.session_state.pop(LOGIN_FLASH_UNTIL, None)
     st.session_state.pop(FULL_BUNDLES_LOADED, None)
     st.session_state.pop(PENDING_DB_RESTORE, None)
+    clear_auth_cookie()
     # ログアウトで DB は消さない（persist / GitHub が正）
     for key in list(st.session_state.keys()):
         if str(key).startswith("bundles_"):
@@ -194,6 +318,8 @@ def render_login_page() -> bool:
             st.code(
                 """KEIRIN_AUTH_USERNAME=your_username
 KEIRIN_AUTH_PASSWORD=your_password
+# 任意: Cookie 署名専用（未設定時はパスワードから自動導出）
+KEIRIN_AUTH_COOKIE_SECRET=your_random_secret
 """,
                 language="bash",
             )
@@ -240,6 +366,16 @@ def require_authentication() -> bool:
     if is_authenticated():
         log_session_state("require-auth")
         return True
+
+    cookie_result = try_restore_session_from_cookie()
+    if cookie_result is None:
+        if not st.session_state.get(AUTH_COOKIE_AWAIT):
+            st.session_state[AUTH_COOKIE_AWAIT] = True
+        st.stop()
+    if cookie_result:
+        log_session_state("require-auth-cookie")
+        return True
+
     if render_login_page():
         if is_authenticated():
             log_session_state("require-auth-after-login")

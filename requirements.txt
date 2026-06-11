@@ -8,5 +8,6 @@ numpy>=1.26.0
 pandas>=2.2.0
 plotly>=5.18.0
 streamlit>=1.32.0
+extra-streamlit-components>=0.1.71
 xgboost>=2.0.0
 scikit-learn>=1.4.0

@@ -24,5 +24,8 @@ services:
         sync: false
       - key: KEIRIN_AUTH_PASSWORD
         sync: false
+      # 任意: Cookie 署名専用（未設定時は KEIRIN_AUTH_PASSWORD から自動導出）
+      - key: KEIRIN_AUTH_COOKIE_SECRET
+        sync: false
       - key: KEIRIN_ENABLE_HOME_GOALS
         value: "0"
