@@ -77,21 +77,37 @@ def safe_table_count(conn: sqlite3.Connection, table: str) -> int:
     return int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
 
 
-def get_db_status() -> dict:
-    """テーブル未作成時も落ちない件数サマリー（Streamlit Cloud 向け）"""
+def get_db_counts_fast() -> dict:
+    """件数のみ（bootstrap / GitHub 復元なし — UI 起動用）"""
     try:
-        ensure_db()
         conn = get_connection()
         try:
+            if not table_exists(conn, "races"):
+                return {
+                    "races": 0,
+                    "results": 0,
+                    "odds": 0,
+                    "learning": 0,
+                    "ready": False,
+                }
             return {
                 "races": safe_table_count(conn, "races"),
                 "results": safe_table_count(conn, "results"),
                 "odds": safe_table_count(conn, "odds"),
                 "learning": safe_table_count(conn, "learned_patterns"),
-                "ready": table_exists(conn, "races"),
+                "ready": True,
             }
         finally:
             conn.close()
+    except Exception:
+        return {"races": 0, "results": 0, "odds": 0, "learning": 0, "ready": False}
+
+
+def get_db_status() -> dict:
+    """テーブル未作成時も落ちない件数サマリー（workflow 等 — bootstrap あり）"""
+    try:
+        ensure_db()
+        return get_db_counts_fast()
     except Exception:
         return {"races": 0, "results": 0, "odds": 0, "learning": 0, "ready": False}
 
