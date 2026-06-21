@@ -1,0 +1,12 @@
+{
+  "scenario": "warm_db_local_1race",
+  "load_app_bundles_sec": 1.808,
+  "load_app_bundles_api": 0,
+  "load_app_bundles_sleep_sec": 0.0,
+  "build_race_scores_true_sec": 1.774,
+  "build_race_scores_true_api": 1,
+  "build_race_scores_false_sec": 0.051,
+  "line_fetch_true_sec": 1.538,
+  "line_fetch_true_api": 1,
+  "line_fetch_false_sec": 0.012
+}

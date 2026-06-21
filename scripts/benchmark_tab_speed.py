@@ -155,7 +155,11 @@ def _tab_loaders(bet_type: str, mtime: float) -> dict[str, tuple[str, callable]]
         "predict_prerace": ("⏱ 直前分析", lambda: get_pre_race_bundle(bet_type)),
         "predict_chart": (
             "📈 グラフ",
-            lambda: get_charts_bundle(bet_type, min_score=70),
+            lambda: get_charts_bundle(
+                bet_type,
+                min_score=70,
+                scores=get_ai_score_bundle(bet_type)["scores"],
+            ),
         ),
         "market": ("📡 市場監視", lambda: get_market_monitor_bundle(bet_type)),
         "bankroll": (

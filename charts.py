@@ -153,7 +153,7 @@ def high_score_races(
     scores: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     if scores is None:
-        scores = build_race_scores(bet_type)
+        scores = build_race_scores(bet_type, fetch_missing_lines=False)
     if scores.empty:
         return scores
     cols = [
@@ -426,12 +426,15 @@ def fig_ai_score_scatter(scores: pd.DataFrame, bet_type: str = "3連単") -> go.
 def get_charts_bundle(
     bet_type: str = "3連単",
     min_score: float = HIGH_SCORE_DEFAULT,
+    *,
+    scores: pd.DataFrame | None = None,
 ) -> dict:
     """Streamlit 用: データと Plotly 図をまとめて返す"""
     summary = _race_summary(bet_type)
     by_date = recovery_trend_by_date(bet_type)
     venue = venue_recovery_ranking(bet_type)
-    scores = build_race_scores(bet_type)
+    if scores is None:
+        scores = build_race_scores(bet_type, fetch_missing_lines=False)
     high = high_score_races(bet_type, min_score, scores=scores)
 
     has_data = not summary.empty or not scores.empty

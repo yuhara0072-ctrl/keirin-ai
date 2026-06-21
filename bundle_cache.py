@@ -116,7 +116,8 @@ def cached_ai_insights_bundle(bet_type: str, _mtime: float) -> dict:
 def cached_charts_bundle(bet_type: str, min_score: int, _mtime: float) -> dict:
     from charts import get_charts_bundle
 
-    return get_charts_bundle(bet_type, min_score=min_score)
+    scores = cached_ai_score_bundle(bet_type, _mtime)["scores"]
+    return get_charts_bundle(bet_type, min_score=min_score, scores=scores)
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -294,6 +295,125 @@ def cached_system_check_bundle(bet_type: str, deep: bool, _mtime: float) -> dict
         learning_bundle=learning,
         backup_bundle=backup,
     )
+
+
+def build_full_app_bundles(bet_type: str) -> dict:
+    """全バンドル一括読込 — scores 共有・fetch_missing=False・並列取得（load_app_bundles 経路）"""
+    from config import TARGET_RACES
+    from detect_anomaly import detect_all
+    from report import build_analyze_lines
+
+    from advanced_learning import get_advanced_learning_bundle
+    from ai_insights import get_ai_insights_bundle
+    from ai_recommend import get_ai_recommend_bundle
+    from ai_score import get_ai_score_bundle
+    from backup import get_backup_bundle
+    from battle_judge import get_battle_judge_bundle
+    from bet_tracker import get_pnl_bundle
+    from bulk_collect import get_collect_bundle
+    from charts import HIGH_SCORE_DEFAULT, get_charts_bundle
+    from data_quality import get_quality_bundle
+    from improvement_ai import get_improvement_bundle
+    from learning import get_learning_bundle
+    from line_analysis import get_line_analysis_bundle
+    from market_monitor import get_market_monitor_bundle
+    from ml_model import get_ml_bundle
+    from notifications import get_notification_bundle
+    from ops import get_ops_status
+    from pre_race import get_pre_race_bundle
+    from validation_report import get_validation_bundle
+    from bankroll import get_bankroll_bundle
+
+    score_bundle = get_ai_score_bundle(bet_type)
+    scores = score_bundle["scores"]
+    recommend_bundle = get_ai_recommend_bundle(bet_type, scores=scores)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        f_pre = pool.submit(get_pre_race_bundle, bet_type)
+        f_market = pool.submit(get_market_monitor_bundle, bet_type)
+        f_learning = pool.submit(lambda: get_learning_bundle(bet_type, refresh=True))
+        f_quality = pool.submit(get_quality_bundle, bet_type)
+        f_advanced = pool.submit(get_advanced_learning_bundle, bet_type, retrain=False)
+        f_line = pool.submit(get_line_analysis_bundle, fetch_missing=False)
+        f_ml = pool.submit(get_ml_bundle, bet_type, scores, retrain=False)
+        f_backup = pool.submit(get_backup_bundle)
+        f_charts = pool.submit(
+            lambda: get_charts_bundle(
+                bet_type, HIGH_SCORE_DEFAULT, scores=scores
+            )
+        )
+
+        pre_race_bundle = f_pre.result()
+        market_bundle = f_market.result()
+        learning_bundle = f_learning.result()
+        quality_bundle = f_quality.result()
+        advanced_bundle = f_advanced.result()
+        line_bundle = f_line.result()
+        ml_bundle = f_ml.result()
+        backup_bundle = f_backup.result()
+        charts_bundle = f_charts.result()
+
+    battle_bundle = get_battle_judge_bundle(
+        bet_type,
+        scores=scores,
+        market=market_bundle,
+        line=line_bundle,
+        pre_race=pre_race_bundle,
+        ml=ml_bundle,
+        quality=quality_bundle,
+        advanced=advanced_bundle,
+    )
+    bankroll_bundle = get_bankroll_bundle(bet_type, battle_bundle=battle_bundle)
+    validation_bundle = get_validation_bundle(
+        bet_type,
+        battle_bundle=battle_bundle,
+        bankroll_plan=bankroll_bundle,
+        sync_virtual=True,
+    )
+
+    return {
+        "analyze_text": "\n".join(build_analyze_lines(bet_type)),
+        "ai_bundle": get_ai_insights_bundle(bet_type, fetch_missing=False),
+        "score_bundle": score_bundle,
+        "recommend_bundle": recommend_bundle,
+        "ops_status": get_ops_status(
+            bet_type,
+            fast=True,
+            targets_count=len(recommend_bundle.get("targets") or []),
+        ),
+        "charts_bundle": charts_bundle,
+        "line_bundle": line_bundle,
+        "market_bundle": market_bundle,
+        "learning_bundle": learning_bundle,
+        "pre_race_bundle": pre_race_bundle,
+        "ml_bundle": ml_bundle,
+        "notify_bundle": get_notification_bundle(
+            bet_type,
+            scores=scores,
+            recommend=recommend_bundle,
+            pre_race=pre_race_bundle,
+            market=market_bundle,
+            persist=True,
+        ),
+        "backup_bundle": backup_bundle,
+        "pnl_bundle": get_pnl_bundle(
+            bet_type, recommend=recommend_bundle, sync_virtual=False
+        ),
+        "collect_bundle": get_collect_bundle(TARGET_RACES),
+        "quality_bundle": quality_bundle,
+        "advanced_bundle": advanced_bundle,
+        "battle_bundle": battle_bundle,
+        "bankroll_bundle": bankroll_bundle,
+        "validation_bundle": validation_bundle,
+        "improvement_bundle": get_improvement_bundle(
+            bet_type,
+            validation=validation_bundle,
+            bankroll_plan=bankroll_bundle,
+            quality=quality_bundle,
+            advanced=advanced_bundle,
+        ),
+        "detect_df": detect_all(bet_type),
+    }
 
 
 def load_tab_bundle(tab_key: str, bet_type: str, *, deep_check: bool = False) -> None:

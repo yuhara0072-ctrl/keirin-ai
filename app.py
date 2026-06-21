@@ -199,6 +199,7 @@ from auth import (
 )
 from bundle_cache import (
     DB_COUNTS_SESSION_KEY,
+    build_full_app_bundles,
     clear_bundle_caches,
     get_tab_bundle,
     invalidate_db_counts_cache,
@@ -296,75 +297,8 @@ def empty_validation_bundle() -> dict:
 
 
 def load_app_bundles(bet_type: str) -> dict:
-    """データ0件・Cloud初回でも落ちないバンドル読み込み"""
-    score_bundle = get_ai_score_bundle(bet_type)
-    recommend_bundle = get_ai_recommend_bundle(
-        bet_type, scores=score_bundle["scores"]
-    )
-    pre_race_bundle = get_pre_race_bundle(bet_type)
-    market_bundle = get_market_monitor_bundle(bet_type)
-    learning_bundle = get_learning_bundle(bet_type, refresh=True)
-    ml_bundle = get_ml_bundle(bet_type, scores=score_bundle["scores"], retrain=False)
-    quality_bundle = get_quality_bundle(bet_type)
-    advanced_bundle = get_advanced_learning_bundle(bet_type, retrain=False)
-    line_bundle = get_line_analysis_bundle()
-    battle_bundle = get_battle_judge_bundle(
-        bet_type,
-        scores=score_bundle["scores"],
-        market=market_bundle,
-        line=line_bundle,
-        pre_race=pre_race_bundle,
-        ml=ml_bundle,
-        quality=quality_bundle,
-        advanced=advanced_bundle,
-    )
-    bankroll_bundle = get_bankroll_bundle(bet_type, battle_bundle=battle_bundle)
-    validation_bundle = get_validation_bundle(
-        bet_type,
-        battle_bundle=battle_bundle,
-        bankroll_plan=bankroll_bundle,
-        sync_virtual=True,
-    )
-    backup_bundle = get_backup_bundle()
-    return {
-        "analyze_text": lines_to_text(build_analyze_lines(bet_type)),
-        "ai_bundle": get_ai_insights_bundle(bet_type),
-        "score_bundle": score_bundle,
-        "recommend_bundle": recommend_bundle,
-        "ops_status": get_ops_status(
-            bet_type,
-            fast=True,
-            targets_count=len(recommend_bundle.get("targets") or []),
-        ),
-        "charts_bundle": get_charts_bundle(bet_type),
-        "line_bundle": line_bundle,
-        "market_bundle": market_bundle,
-        "learning_bundle": learning_bundle,
-        "pre_race_bundle": pre_race_bundle,
-        "ml_bundle": ml_bundle,
-        "notify_bundle": get_notification_bundle(
-            bet_type,
-            scores=score_bundle["scores"],
-            recommend=recommend_bundle,
-            pre_race=pre_race_bundle,
-            market=market_bundle,
-            persist=True,
-        ),
-        "backup_bundle": backup_bundle,
-        "pnl_bundle": get_pnl_bundle(bet_type, recommend=recommend_bundle, sync_virtual=False),
-        "collect_bundle": get_collect_bundle(TARGET_RACES),
-        "quality_bundle": quality_bundle,
-        "advanced_bundle": advanced_bundle,
-        "battle_bundle": battle_bundle,
-        "bankroll_bundle": bankroll_bundle,
-        "validation_bundle": validation_bundle,
-        "improvement_bundle": get_improvement_bundle(
-            bet_type,
-            validation=validation_bundle,
-            bankroll_plan=bankroll_bundle,
-        ),
-        "detect_df": detect_all(bet_type),
-    }
+    """データ0件・Cloud初回でも落ちないバンドル読み込み（bundle_cache 経路）"""
+    return build_full_app_bundles(bet_type)
 
 
 def invalidate_bundles_cache() -> None:

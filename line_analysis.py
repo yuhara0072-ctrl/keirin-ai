@@ -257,7 +257,7 @@ def analyze_race_lines(
     }
 
 
-def build_all_line_analysis(*, fetch_missing: bool = True) -> tuple[pd.DataFrame, list[dict]]:
+def build_all_line_analysis(*, fetch_missing: bool = False) -> tuple[pd.DataFrame, list[dict]]:
     """全レースのライン分析
 
     fetch_missing=False のとき API 取得をスキップ（UI 読込高速化、DB の line_info のみ使用）
@@ -343,7 +343,7 @@ def build_line_analysis_lines(reports: Optional[list[dict]] = None) -> list[str]
     return lines
 
 
-def get_line_analysis_bundle(*, fetch_missing: bool = True) -> dict:
+def get_line_analysis_bundle(*, fetch_missing: bool = False) -> dict:
     """Streamlit 用"""
     lines_df, race_reports = build_all_line_analysis(fetch_missing=fetch_missing)
 
