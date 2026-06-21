@@ -257,8 +257,11 @@ def analyze_race_lines(
     }
 
 
-def build_all_line_analysis() -> tuple[pd.DataFrame, list[dict]]:
-    """全レースのライン分析"""
+def build_all_line_analysis(*, fetch_missing: bool = True) -> tuple[pd.DataFrame, list[dict]]:
+    """全レースのライン分析
+
+    fetch_missing=False のとき API 取得をスキップ（UI 読込高速化、DB の line_info のみ使用）
+    """
     entries = load_entries_frame()
     conn = get_connection()
     races = pd.read_sql(
@@ -280,9 +283,12 @@ def build_all_line_analysis() -> tuple[pd.DataFrame, list[dict]]:
         race_id = race["race_id"]
         line_info = race.get("line_info") or ""
         if not line_info or line_info == "不明" or pd.isna(line_info):
-            try:
-                line_info, _ = update_line_from_api(race_id)
-            except Exception:
+            if fetch_missing:
+                try:
+                    line_info, _ = update_line_from_api(race_id)
+                except Exception:
+                    line_info = "不明"
+            else:
                 line_info = "不明"
 
         report = analyze_race_lines(
@@ -337,9 +343,9 @@ def build_line_analysis_lines(reports: Optional[list[dict]] = None) -> list[str]
     return lines
 
 
-def get_line_analysis_bundle() -> dict:
+def get_line_analysis_bundle(*, fetch_missing: bool = True) -> dict:
     """Streamlit 用"""
-    lines_df, race_reports = build_all_line_analysis()
+    lines_df, race_reports = build_all_line_analysis(fetch_missing=fetch_missing)
 
     advantageous: list[dict] = []
     dangerous: list[dict] = []

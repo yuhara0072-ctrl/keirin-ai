@@ -150,8 +150,10 @@ def venue_recovery_ranking(bet_type: str = "3連単") -> pd.DataFrame:
 def high_score_races(
     bet_type: str = "3連単",
     min_score: float = HIGH_SCORE_DEFAULT,
+    scores: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    scores = build_race_scores(bet_type)
+    if scores is None:
+        scores = build_race_scores(bet_type)
     if scores.empty:
         return scores
     cols = [
@@ -430,7 +432,7 @@ def get_charts_bundle(
     by_date = recovery_trend_by_date(bet_type)
     venue = venue_recovery_ranking(bet_type)
     scores = build_race_scores(bet_type)
-    high = high_score_races(bet_type, min_score)
+    high = high_score_races(bet_type, min_score, scores=scores)
 
     has_data = not summary.empty or not scores.empty
 

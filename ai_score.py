@@ -295,11 +295,13 @@ def build_race_scores(
     *,
     score_weights: Optional[dict[str, float]] = None,
     patterns: Optional[pd.DataFrame] = None,
+    fetch_missing_lines: bool = True,
 ) -> pd.DataFrame:
     return build_race_scores_with_options(
         bet_type,
         score_weights=score_weights,
         patterns=patterns,
+        fetch_missing_lines=fetch_missing_lines,
     )
 
 
@@ -308,9 +310,10 @@ def build_race_scores_with_options(
     *,
     score_weights: Optional[dict[str, float]] = None,
     patterns: Optional[pd.DataFrame] = None,
+    fetch_missing_lines: bool = True,
 ) -> pd.DataFrame:
     """レース単位AIスコア一覧（本格学習の重み・パターン指定可）"""
-    metrics = build_race_metrics(bet_type)
+    metrics = build_race_metrics(bet_type, fetch_missing=fetch_missing_lines)
     if metrics.empty:
         return pd.DataFrame()
 
@@ -397,8 +400,11 @@ def build_race_scores_with_options(
     return df
 
 
-def build_ai_score_lines(bet_type: str = "3連単") -> list[str]:
-    df = build_race_scores(bet_type)
+def build_ai_score_lines(
+    bet_type: str = "3連単",
+    scores: Optional[pd.DataFrame] = None,
+) -> list[str]:
+    df = scores if scores is not None else build_race_scores(bet_type)
     lines = [f"【AIスコア・おすすめ】券種={bet_type}", ""]
     if df.empty:
         lines.append("データがありません。workflow を実行してください。")
@@ -424,11 +430,15 @@ def build_ai_score_lines(bet_type: str = "3連単") -> list[str]:
     return lines
 
 
-def get_ai_score_bundle(bet_type: str = "3連単") -> dict:
+def get_ai_score_bundle(
+    bet_type: str = "3連単",
+    *,
+    fetch_missing_lines: bool = False,
+) -> dict:
     """Streamlit 用"""
-    scores = build_race_scores(bet_type)
+    scores = build_race_scores(bet_type, fetch_missing_lines=fetch_missing_lines)
     return {
         "scores": scores,
-        "lines": build_ai_score_lines(bet_type),
+        "lines": build_ai_score_lines(bet_type, scores=scores),
         "top_races": scores.head(10) if not scores.empty else pd.DataFrame(),
     }

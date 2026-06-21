@@ -1,6 +1,7 @@
 """レース特徴量（AI予測強化用指標）"""
 
 import time
+from functools import lru_cache
 from typing import Optional
 
 import pandas as pd
@@ -14,11 +15,22 @@ from analyze import (
     summarize,
     winning_combinations,
 )
-from config import RACE_API_URL, REQUEST_INTERVAL, REQUEST_TIMEOUT, USER_AGENT
+from config import DB_PATH, RACE_API_URL, REQUEST_INTERVAL, REQUEST_TIMEOUT, USER_AGENT
 from db import db_session, get_connection
 
 MAN_TICKET_YEN = 10_000
 MAN_TICKET_ODDS = 100.0
+
+
+def db_mtime() -> float:
+    try:
+        return float(DB_PATH.stat().st_mtime) if DB_PATH.exists() else 0.0
+    except OSError:
+        return 0.0
+
+
+def clear_race_metrics_cache() -> None:
+    _build_race_metrics_cached.cache_clear()
 
 
 def _headers() -> dict[str, str]:
@@ -111,8 +123,24 @@ def _race_odds_snapshot(bet_type: str = "3連単") -> pd.DataFrame:
     return df
 
 
-def build_race_metrics(bet_type: str = "3連単") -> pd.DataFrame:
-    """レース単位のAI指標"""
+def build_race_metrics(bet_type: str = "3連単", *, fetch_missing: bool = True) -> pd.DataFrame:
+    """レース単位のAI指標
+
+    fetch_missing=False のとき line_info 欠損レースの API 取得をスキップ（UI 高速化）
+    """
+    df = _build_race_metrics_cached(bet_type, db_mtime(), fetch_missing)
+    return df.copy()
+
+
+@lru_cache(maxsize=32)
+def _build_race_metrics_cached(
+    bet_type: str, _mtime: float, fetch_missing: bool
+) -> pd.DataFrame:
+    return _build_race_metrics_impl(bet_type, fetch_missing=fetch_missing)
+
+
+def _build_race_metrics_impl(bet_type: str = "3連単", *, fetch_missing: bool = True) -> pd.DataFrame:
+    """レース単位のAI指標（キャッシュなし実装）"""
     entries = load_entries_frame()
     conn = get_connection()
     races = pd.read_sql(
@@ -141,9 +169,12 @@ def build_race_metrics(bet_type: str = "3連単") -> pd.DataFrame:
         line_info = race.get("line_info") or ""
         line_count = int(race.get("line_count") or 0)
         if not line_info or line_info == "不明" or pd.isna(line_info):
-            try:
-                line_info, line_count = update_line_from_api(race_id)
-            except Exception:
+            if fetch_missing:
+                try:
+                    line_info, line_count = update_line_from_api(race_id)
+                except Exception:
+                    line_info, line_count = "不明", 0
+            else:
                 line_info, line_count = "不明", 0
 
         ro = odds[odds["race_id"] == race_id]

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
 import streamlit as st
 
 from config import DB_PATH
@@ -33,9 +35,12 @@ def invalidate_tab_bundles() -> None:
 
 def clear_bundle_caches() -> None:
     """workflow 後など — session + st.cache_data"""
+    from race_features import clear_race_metrics_cache
+
     invalidate_db_counts_cache()
     invalidate_tab_bundles()
     st.session_state.pop("full_bundles_data", None)
+    clear_race_metrics_cache()
     st.cache_data.clear()
 
 
@@ -75,7 +80,7 @@ def cached_ai_recommend_bundle(bet_type: str, _mtime: float) -> dict:
 def cached_line_bundle(_mtime: float) -> dict:
     from line_analysis import get_line_analysis_bundle
 
-    return get_line_analysis_bundle()
+    return get_line_analysis_bundle(fetch_missing=False)
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -104,7 +109,7 @@ def cached_ml_bundle(bet_type: str, _mtime: float) -> dict:
 def cached_ai_insights_bundle(bet_type: str, _mtime: float) -> dict:
     from ai_insights import get_ai_insights_bundle
 
-    return get_ai_insights_bundle(bet_type)
+    return get_ai_insights_bundle(bet_type, fetch_missing=False, include_lines=True)
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -135,27 +140,66 @@ def cached_advanced_bundle(bet_type: str, _mtime: float) -> dict:
     return get_advanced_learning_bundle(bet_type, retrain=False)
 
 
+def _load_battle_dependencies(bet_type: str, mtime: float) -> dict:
+    """実戦判定の入力 bundle を並列取得（計算ロジックは変更なし）"""
+    from ml_model import get_ml_bundle
+
+    with ThreadPoolExecutor(max_workers=7) as pool:
+        f_score = pool.submit(cached_ai_score_bundle, bet_type, mtime)
+        f_market = pool.submit(cached_market_bundle, bet_type, mtime)
+        f_line = pool.submit(cached_line_bundle, mtime)
+        f_pre = pool.submit(cached_pre_race_bundle, bet_type, mtime)
+        f_quality = pool.submit(cached_quality_bundle, bet_type, mtime)
+        f_advanced = pool.submit(cached_advanced_bundle, bet_type, mtime)
+        score_bundle = f_score.result()
+        f_ml = pool.submit(
+            lambda sb=score_bundle: get_ml_bundle(
+                bet_type, sb["scores"], retrain=False
+            )
+        )
+        return {
+            "scores": score_bundle["scores"],
+            "market": f_market.result(),
+            "line": f_line.result(),
+            "pre_race": f_pre.result(),
+            "ml": f_ml.result(),
+            "quality": f_quality.result(),
+            "advanced": f_advanced.result(),
+        }
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def cached_battle_judge_bundle(bet_type: str, _mtime: float) -> dict:
     from battle_judge import get_battle_judge_bundle
 
-    mtime = _mtime
-    scores = cached_ai_score_bundle(bet_type, mtime)
-    market = cached_market_bundle(bet_type, mtime)
-    line = cached_line_bundle(mtime)
-    pre_race = cached_pre_race_bundle(bet_type, mtime)
-    ml = cached_ml_bundle(bet_type, mtime)
-    quality = cached_quality_bundle(bet_type, mtime)
-    advanced = cached_advanced_bundle(bet_type, mtime)
+    deps = _load_battle_dependencies(bet_type, _mtime)
     return get_battle_judge_bundle(
         bet_type,
-        scores=scores["scores"],
-        market=market,
-        line=line,
-        pre_race=pre_race,
-        ml=ml,
-        quality=quality,
-        advanced=advanced,
+        scores=deps["scores"],
+        market=deps["market"],
+        line=deps["line"],
+        pre_race=deps["pre_race"],
+        ml=deps["ml"],
+        quality=deps["quality"],
+        advanced=deps["advanced"],
+    )
+
+
+def _validation_bundle_from_battle(
+    bet_type: str,
+    battle: dict,
+    *,
+    sync_virtual: bool,
+) -> dict:
+    from bankroll import get_bankroll_bundle
+    from validation_report import get_validation_bundle
+
+    bankroll = get_bankroll_bundle(bet_type, battle_bundle=battle)
+    return get_validation_bundle(
+        bet_type,
+        battle_bundle=battle,
+        bankroll_plan=bankroll,
+        sync_virtual=sync_virtual,
     )
 
 
@@ -177,28 +221,34 @@ def cached_pnl_bundle(bet_type: str, _mtime: float) -> dict:
 
 @st.cache_data(ttl=600, show_spinner=False)
 def cached_validation_bundle(bet_type: str, _mtime: float) -> dict:
-    from validation_report import get_validation_bundle
-
     battle = cached_battle_judge_bundle(bet_type, _mtime)
-    bankroll = cached_bankroll_bundle(bet_type, _mtime)
-    return get_validation_bundle(
-        bet_type,
-        battle_bundle=battle,
-        bankroll_plan=bankroll,
-        sync_virtual=True,
-    )
+    return _validation_bundle_from_battle(bet_type, battle, sync_virtual=False)
 
 
 @st.cache_data(ttl=600, show_spinner=False)
 def cached_improvement_bundle(bet_type: str, _mtime: float) -> dict:
     from improvement_ai import get_improvement_bundle
 
-    validation = cached_validation_bundle(bet_type, _mtime)
-    bankroll = cached_bankroll_bundle(bet_type, _mtime)
+    battle = cached_battle_judge_bundle(bet_type, _mtime)
+    from bankroll import get_bankroll_bundle
+
+    bankroll = get_bankroll_bundle(bet_type, battle_bundle=battle)
+    from validation_report import get_validation_bundle
+
+    validation = get_validation_bundle(
+        bet_type,
+        battle_bundle=battle,
+        bankroll_plan=bankroll,
+        sync_virtual=False,
+    )
+    quality = cached_quality_bundle(bet_type, _mtime)
+    advanced = cached_advanced_bundle(bet_type, _mtime)
     return get_improvement_bundle(
         bet_type,
         validation=validation,
         bankroll_plan=bankroll,
+        quality=quality,
+        advanced=advanced,
     )
 
 
@@ -227,11 +277,15 @@ def cached_ops_status(bet_type: str, _mtime: float) -> dict:
 def cached_system_check_bundle(bet_type: str, deep: bool, _mtime: float) -> dict:
     from system_check import get_system_check_bundle
 
-    mtime = _mtime
-    quality = cached_quality_bundle(bet_type, mtime)
-    score = cached_ai_score_bundle(bet_type, mtime)
-    learning = cached_learning_bundle(bet_type, False, mtime)
-    backup = cached_backup_bundle(mtime)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        f_quality = pool.submit(cached_quality_bundle, bet_type, _mtime)
+        f_score = pool.submit(cached_ai_score_bundle, bet_type, _mtime)
+        f_learning = pool.submit(cached_learning_bundle, bet_type, False, _mtime)
+        f_backup = pool.submit(cached_backup_bundle, _mtime)
+        quality = f_quality.result()
+        score = f_score.result()
+        learning = f_learning.result()
+        backup = f_backup.result()
     return get_system_check_bundle(
         bet_type,
         deep=deep,
@@ -274,7 +328,7 @@ def load_tab_bundle(tab_key: str, bet_type: str, *, deep_check: bool = False) ->
             "pnl_bundle": cached_pnl_bundle(bet_type, mtime),
             "recommend_bundle": cached_ai_recommend_bundle(bet_type, mtime),
         },
-        "learn": lambda: {"learning_bundle": cached_learning_bundle(bet_type, True, mtime)},
+        "learn": lambda: {"learning_bundle": cached_learning_bundle(bet_type, False, mtime)},
         "advanced": lambda: {"advanced_bundle": cached_advanced_bundle(bet_type, mtime)},
         "quality": lambda: {"quality_bundle": cached_quality_bundle(bet_type, mtime)},
         "collect": lambda: {"collect_bundle": cached_collect_bundle(100, mtime)},

@@ -617,7 +617,7 @@ def get_advanced_learning_bundle(
     train_result: dict[str, Any] = {}
 
     valid_ids = get_valid_race_ids(bet_type)
-    if retrain or patterns.empty:
+    if retrain:
         train_result = run_advanced_learning(bet_type)
         patterns = load_advanced_patterns(bet_type)
         meta_file = load_advanced_meta(bet_type)

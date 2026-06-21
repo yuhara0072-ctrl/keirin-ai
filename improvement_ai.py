@@ -534,7 +534,7 @@ def build_improvement_proposals(
 
         bankroll_plan = get_bankroll_bundle(bet_type)
     if quality is None:
-        quality = get_quality_bundle(bet_type)
+        quality = get_quality_bundle(bet_type, refresh=False)
     if advanced is None:
         from advanced_learning import get_advanced_learning_bundle
 
@@ -630,11 +630,15 @@ def get_improvement_bundle(
     *,
     validation: Optional[dict] = None,
     bankroll_plan: Optional[dict] = None,
+    quality: Optional[dict] = None,
+    advanced: Optional[dict] = None,
 ) -> dict:
     bundle = build_improvement_proposals(
         bet_type,
         validation=validation,
         bankroll_plan=bankroll_plan,
+        quality=quality,
+        advanced=advanced,
     )
     bundle["lines"] = build_improvement_lines(bundle)
     return bundle

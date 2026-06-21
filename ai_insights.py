@@ -12,18 +12,21 @@ from race_features import (
 )
 
 
-def build_ai_insights_lines(bet_type: str = "3連単") -> list[str]:
-    metrics = build_race_metrics(bet_type)
+def build_ai_insights_lines(
+    bet_type: str = "3連単",
+    metrics: Optional[pd.DataFrame] = None,
+) -> list[str]:
+    df = metrics if metrics is not None else build_race_metrics(bet_type, fetch_missing=False)
     lines = [
         f"【AI予測強化指標】券種={bet_type}",
         "",
     ]
-    if metrics.empty:
+    if df.empty:
         lines.append("データがありません。workflow を実行してください。")
         lines.append("")
         return lines
 
-    rates = overall_rates(metrics)
+    rates = overall_rates(df)
     lines.append("--- 全体サマリー ---")
     lines.append(f"  対象レース: {rates.get('races', 0)}")
     lines.append(f"  平均人気集中率: {rates.get('avg_ninki_concentration', 0)}%")
@@ -33,28 +36,28 @@ def build_ai_insights_lines(bet_type: str = "3連単") -> list[str]:
     lines.append(f"  平均逃げ人数: {rates.get('avg_nige_count', 0)}名")
     lines.append("")
 
-    vt = venue_trends(metrics)
+    vt = venue_trends(df)
     lines.append("--- 競輪場別傾向 ---")
     lines.append(vt.to_string(index=False) if not vt.empty else "  （データなし）")
     lines.append("")
 
     lines.append("--- ライン本数別 回収率 ---")
-    rl = recovery_by_feature(bet_type, "line_count", metrics)
+    rl = recovery_by_feature(bet_type, "line_count", df)
     lines.append(rl.to_string(index=False) if not rl.empty else "  （データなし）")
     lines.append("")
 
     lines.append("--- 逃げ人数別 回収率 ---")
-    rn = recovery_by_feature(bet_type, "nige_count", metrics)
+    rn = recovery_by_feature(bet_type, "nige_count", df)
     lines.append(rn.to_string(index=False) if not rn.empty else "  （データなし）")
     lines.append("")
 
     lines.append("--- 人気集中率帯別 回収率 ---")
-    rc = recovery_by_feature(bet_type, "ninki_concentration", metrics)
+    rc = recovery_by_feature(bet_type, "ninki_concentration", df)
     lines.append(rc.to_string(index=False) if not rc.empty else "  （データなし）")
     lines.append("")
 
     lines.append("--- 荒れ指数帯別 回収率 ---")
-    ra = recovery_by_feature(bet_type, "are_index", metrics)
+    ra = recovery_by_feature(bet_type, "are_index", df)
     lines.append(ra.to_string(index=False) if not ra.empty else "  （データなし）")
     lines.append("")
 
@@ -71,15 +74,20 @@ def build_ai_insights_lines(bet_type: str = "3連単") -> list[str]:
         "man_ticket",
         "trifecta_pay",
     ]
-    lines.append(metrics[show_cols].tail(20).to_string(index=False))
+    lines.append(df[show_cols].tail(20).to_string(index=False))
     lines.append("")
     return lines
 
 
-def get_ai_insights_bundle(bet_type: str = "3連単") -> dict:
+def get_ai_insights_bundle(
+    bet_type: str = "3連単",
+    *,
+    fetch_missing: bool = False,
+    include_lines: bool = True,
+) -> dict:
     """Streamlit 用"""
-    metrics = build_race_metrics(bet_type)
-    return {
+    metrics = build_race_metrics(bet_type, fetch_missing=fetch_missing)
+    bundle = {
         "metrics": metrics,
         "venue_trends": venue_trends(metrics),
         "overall": overall_rates(metrics),
@@ -87,5 +95,8 @@ def get_ai_insights_bundle(bet_type: str = "3連単") -> dict:
         "recovery_nige": recovery_by_feature(bet_type, "nige_count", metrics),
         "recovery_ninki": recovery_by_feature(bet_type, "ninki_concentration", metrics),
         "recovery_are": recovery_by_feature(bet_type, "are_index", metrics),
-        "lines": build_ai_insights_lines(bet_type),
+        "lines": [],
     }
+    if include_lines:
+        bundle["lines"] = build_ai_insights_lines(bet_type, metrics=metrics)
+    return bundle
