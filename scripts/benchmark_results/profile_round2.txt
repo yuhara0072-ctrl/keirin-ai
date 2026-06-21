@@ -1,0 +1,33 @@
+﻿
+=== battle ===
+  0.052s  cached_ai_score_bundle
+  0.012s  market
+  0.006s  line (no api)
+  0.012s  pre_race
+  0.011s  quality
+  0.024s  advanced
+  1.555s  ml
+  0.010s  battle_judge merge
+
+=== predict_ai ===
+  1.679s  build_race_metrics
+  0.002s  recovery line
+  0.004s  recovery nige
+  0.002s  recovery ninki
+  0.002s  recovery are
+  0.046s  get_ai_insights_bundle
+
+=== improve ===
+  1.596s  battle (bare)
+  0.052s  bankroll
+  0.026s  validation
+  0.029s  build_improvement_proposals
+  0.030s  get_improvement_bundle
+
+=== check ===
+  0.007s  quality
+  0.028s  score
+  0.010s  learning
+  0.001s  backup
+  1.605s  run_system_checks deep=True
+  1.696s  get_system_check_bundle

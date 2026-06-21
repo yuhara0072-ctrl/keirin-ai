@@ -1,0 +1,247 @@
+[
+  {
+    "key": "home",
+    "label": "🏠 ホーム",
+    "category": "tab",
+    "seconds": 0.004,
+    "error": null
+  },
+  {
+    "key": "rec",
+    "label": "⭐ 今日のAIおすすめ",
+    "category": "tab",
+    "seconds": 2.078,
+    "error": null
+  },
+  {
+    "key": "battle",
+    "label": "🎯 実戦判定",
+    "category": "tab",
+    "seconds": 4.666,
+    "error": null
+  },
+  {
+    "key": "line",
+    "label": "🔗 ライン分析",
+    "category": "tab",
+    "seconds": 1.785,
+    "error": null
+  },
+  {
+    "key": "predict_ai",
+    "label": "📊 AI指標",
+    "category": "tab",
+    "seconds": 3.61,
+    "error": null
+  },
+  {
+    "key": "predict_ml",
+    "label": "🤖 ML予測",
+    "category": "tab",
+    "seconds": 2.049,
+    "error": null
+  },
+  {
+    "key": "predict_prerace",
+    "label": "⏱ 直前分析",
+    "category": "tab",
+    "seconds": 0.025,
+    "error": null
+  },
+  {
+    "key": "predict_chart",
+    "label": "📈 グラフ",
+    "category": "tab",
+    "seconds": 2.426,
+    "error": null
+  },
+  {
+    "key": "market",
+    "label": "📡 市場監視",
+    "category": "tab",
+    "seconds": 0.011,
+    "error": null
+  },
+  {
+    "key": "bankroll",
+    "label": "💰 資金管理",
+    "category": "tab",
+    "seconds": 2.087,
+    "error": null
+  },
+  {
+    "key": "validation",
+    "label": "📊 検証レポート",
+    "category": "tab",
+    "seconds": 2.002,
+    "error": null
+  },
+  {
+    "key": "improve",
+    "label": "💡 改善提案",
+    "category": "tab",
+    "seconds": 4.028,
+    "error": null
+  },
+  {
+    "key": "pnl",
+    "label": "📈 収支検証",
+    "category": "tab",
+    "seconds": 1.933,
+    "error": null
+  },
+  {
+    "key": "learn",
+    "label": "🧠 パターン学習",
+    "category": "tab",
+    "seconds": 0.018,
+    "error": null
+  },
+  {
+    "key": "advanced",
+    "label": "🎓 本格学習",
+    "category": "tab",
+    "seconds": 1.903,
+    "error": null
+  },
+  {
+    "key": "quality",
+    "label": "📋 データ品質",
+    "category": "tab",
+    "seconds": 0.023,
+    "error": null
+  },
+  {
+    "key": "collect",
+    "label": "📥 100レース収集",
+    "category": "tab",
+    "seconds": 0.016,
+    "error": null
+  },
+  {
+    "key": "backup",
+    "label": "💾 バックアップ",
+    "category": "tab",
+    "seconds": 0.002,
+    "error": null
+  },
+  {
+    "key": "check",
+    "label": "🔧 システムチェック",
+    "category": "tab",
+    "seconds": 4.017,
+    "error": null
+  },
+  {
+    "key": "settings_ops",
+    "label": "⚙ 自動運用",
+    "category": "tab",
+    "seconds": 0.013,
+    "error": null
+  },
+  {
+    "key": "bundle:ai_score",
+    "label": "ai_score",
+    "category": "bundle",
+    "seconds": 1.817,
+    "error": null
+  },
+  {
+    "key": "bundle:line",
+    "label": "line_analysis (no API)",
+    "category": "bundle",
+    "seconds": 0.01,
+    "error": null
+  },
+  {
+    "key": "bundle:battle",
+    "label": "battle_judge (full deps)",
+    "category": "bundle",
+    "seconds": 5.622,
+    "error": null
+  },
+  {
+    "key": "bundle:learning_refresh",
+    "label": "learning refresh=True",
+    "category": "bundle",
+    "seconds": 0.026,
+    "error": null
+  },
+  {
+    "key": "bundle:learning_no_refresh",
+    "label": "learning refresh=False",
+    "category": "bundle",
+    "seconds": 0.03,
+    "error": null
+  },
+  {
+    "key": "bundle:validation_sync",
+    "label": "validation sync_virtual=False",
+    "category": "bundle",
+    "seconds": 5.689,
+    "error": null
+  },
+  {
+    "key": "bundle:market",
+    "label": "market_monitor",
+    "category": "bundle",
+    "seconds": 0.007,
+    "error": null
+  },
+  {
+    "key": "bundle:ml",
+    "label": "ml_model",
+    "category": "bundle",
+    "seconds": 1.839,
+    "error": null
+  },
+  {
+    "key": "bundle:charts",
+    "label": "charts",
+    "category": "bundle",
+    "seconds": 2.315,
+    "error": null
+  },
+  {
+    "key": "bundle:quality",
+    "label": "quality",
+    "category": "bundle",
+    "seconds": 0.022,
+    "error": null
+  },
+  {
+    "key": "bundle:advanced",
+    "label": "advanced_learning",
+    "category": "bundle",
+    "seconds": 1.797,
+    "error": null
+  },
+  {
+    "key": "bundle:pre_race",
+    "label": "pre_race",
+    "category": "bundle",
+    "seconds": 0.022,
+    "error": null
+  },
+  {
+    "key": "bundle:ai_insights",
+    "label": "ai_insights",
+    "category": "bundle",
+    "seconds": 3.805,
+    "error": null
+  },
+  {
+    "key": "bundle:recommend",
+    "label": "ai_recommend",
+    "category": "bundle",
+    "seconds": 2.086,
+    "error": null
+  },
+  {
+    "key": "bundle:backup",
+    "label": "backup",
+    "category": "bundle",
+    "seconds": 0.002,
+    "error": null
+  }
+]

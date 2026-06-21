@@ -1,0 +1,12 @@
+﻿python : Traceback (most recent call last):
+発生場所 C:\Users\yuhar\AppData\Local\Temp\ps-script-92728d72-4370-4c9b-9b9b-ba029afe33f7.ps1:82 文字:283
++ ... round2.txt; python scripts/benchmark_tab_speed.py round2 2>&1 | Out-F ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Traceback (most recent call last)::String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  File "C:\Users\yuhar\OneDrive\Desktop\keirin_ai\scripts\benchmark_tab_speed.py", line 364, in <module>
+    main()
+  File "C:\Users\yuhar\OneDrive\Desktop\keirin_ai\scripts\benchmark_tab_speed.py", line 359, in main
+    print(report)
+UnicodeEncodeError: 'cp932' codec can't encode character '\U0001f4c8' in position 146: illegal multibyte sequence
