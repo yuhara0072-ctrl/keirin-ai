@@ -270,48 +270,65 @@ def _import_table(conn, table: str, records: list[dict]) -> None:
 
 
 def import_snapshot(files: dict[str, Any]) -> dict:
-    from db import get_connection, migrate_db
-    from learning import migrate_learning_table
+    from load_diagnostics import diag, span
 
-    conn = get_connection()
-    try:
-        conn.execute("PRAGMA foreign_keys = OFF")
-        for table in ("odds", "entries", "results", "learned_patterns", "races"):
-            if table == "odds":
-                conn.execute("DELETE FROM odds")
-            else:
-                conn.execute(f"DELETE FROM {table}")
+    with span("github.import_snapshot"):
+        from db import get_connection, migrate_db
+        from learning import migrate_learning_table
 
-        _import_table(conn, "races", files.get("races.json") or [])
-        _import_table(conn, "entries", files.get("entries.json") or [])
+        odds_files = sum(
+            1 for n in files if n.startswith(ODDS_CHUNK_PREFIX) and n.endswith(".json")
+        )
+        diag.heartbeat(
+            "import_snapshot_start",
+            races=len(files.get("races.json") or []),
+            results=len(files.get("results.json") or []),
+            odds_files=odds_files,
+        )
 
-        odds_rows: list[dict] = []
-        for name, payload in files.items():
-            if name.startswith(ODDS_CHUNK_PREFIX) and name.endswith(".json"):
-                odds_rows.extend(payload or [])
-        _import_table(conn, "odds", odds_rows)
-        _import_table(conn, "results", files.get("results.json") or [])
-        _import_table(conn, "learned_patterns", files.get("learned_patterns.json") or [])
+        conn = get_connection()
+        try:
+            conn.execute("PRAGMA foreign_keys = OFF")
+            for table in ("odds", "entries", "results", "learned_patterns", "races"):
+                if table == "odds":
+                    conn.execute("DELETE FROM odds")
+                else:
+                    conn.execute(f"DELETE FROM {table}")
 
-        migrate_db(conn)
-        migrate_learning_table(conn)
-        conn.commit()
+            _import_table(conn, "races", files.get("races.json") or [])
+            _import_table(conn, "entries", files.get("entries.json") or [])
 
-        from db import safe_table_count, table_exists
+            odds_rows: list[dict] = []
+            for i, (name, payload) in enumerate(files.items(), 1):
+                if name.startswith(ODDS_CHUNK_PREFIX) and name.endswith(".json"):
+                    odds_rows.extend(payload or [])
+                    if i % 5 == 0:
+                        diag.log_loop("import_odds_files", i, len(files), rows=len(odds_rows))
+            _import_table(conn, "odds", odds_rows)
+            _import_table(conn, "results", files.get("results.json") or [])
+            _import_table(conn, "learned_patterns", files.get("learned_patterns.json") or [])
 
-        return {
-            "race_count": safe_table_count(conn, "races")
-            if table_exists(conn, "races")
-            else 0,
-            "result_count": safe_table_count(conn, "results")
-            if table_exists(conn, "results")
-            else 0,
-            "learning_count": safe_table_count(conn, "learned_patterns")
-            if table_exists(conn, "learned_patterns")
-            else 0,
-        }
-    finally:
-        conn.close()
+            migrate_db(conn)
+            migrate_learning_table(conn)
+            conn.commit()
+
+            from db import safe_table_count, table_exists
+
+            result = {
+                "race_count": safe_table_count(conn, "races")
+                if table_exists(conn, "races")
+                else 0,
+                "result_count": safe_table_count(conn, "results")
+                if table_exists(conn, "results")
+                else 0,
+                "learning_count": safe_table_count(conn, "learned_patterns")
+                if table_exists(conn, "learned_patterns")
+                else 0,
+            }
+            diag.heartbeat("import_snapshot_done", **result)
+            return result
+        finally:
+            conn.close()
 
 
 def save_local_snapshot(files: Optional[dict[str, Any]] = None) -> Path:
@@ -439,46 +456,55 @@ def _ordered_file_names(files: dict[str, Any]) -> list[str]:
 
 
 def download_github_snapshot() -> Optional[dict[str, Any]]:
+    from load_diagnostics import diag, span
+
     if not is_github_enabled():
         return None
-    print(
-        f"[persist] download_github_snapshot branch={GITHUB_PERSIST_BRANCH} repo={GITHUB_REPO}",
-        flush=True,
-    )
-    meta_raw, _ = _github_get_file("meta.json")
-    if not meta_raw:
+    with span("github.download_github_snapshot", branch=GITHUB_PERSIST_BRANCH):
         print(
-            f"[persist] meta.json not found on branch={GITHUB_PERSIST_BRANCH}",
+            f"[persist] download_github_snapshot branch={GITHUB_PERSIST_BRANCH} repo={GITHUB_REPO}",
             flush=True,
         )
-        return None
-    files: dict[str, Any] = {"meta.json": json.loads(meta_raw)}
-    list_url = f"https://api.github.com/repos/{GITHUB_REPO.strip()}/contents/{PERSIST_DIR.name}"
-    resp = requests.get(
-        list_url,
-        headers=_api_headers(),
-        params={"ref": GITHUB_PERSIST_BRANCH},
-        timeout=GITHUB_REQUEST_TIMEOUT,
-    )
-    if resp.status_code == 404:
-        return files if files.get("meta.json") else None
-    resp.raise_for_status()
-    for item in resp.json():
-        if item.get("type") != "file":
-            continue
-        name = item.get("name") or ""
-        if not name.endswith(".json") or name == "meta.json":
-            continue
-        raw, _ = _github_get_file(name)
-        if raw:
-            files[name] = json.loads(raw)
-    race_n = len(files.get("races.json") or [])
-    print(
-        f"[persist] downloaded files={[k for k in files if k.endswith('.json')]} "
-        f"races={race_n} branch={GITHUB_PERSIST_BRANCH}",
-        flush=True,
-    )
-    return files
+        meta_raw, _ = _github_get_file("meta.json")
+        if not meta_raw:
+            print(
+                f"[persist] meta.json not found on branch={GITHUB_PERSIST_BRANCH}",
+                flush=True,
+            )
+            return None
+        files: dict[str, Any] = {"meta.json": json.loads(meta_raw)}
+        list_url = f"https://api.github.com/repos/{GITHUB_REPO.strip()}/contents/{PERSIST_DIR.name}"
+        resp = requests.get(
+            list_url,
+            headers=_api_headers(),
+            params={"ref": GITHUB_PERSIST_BRANCH},
+            timeout=GITHUB_REQUEST_TIMEOUT,
+        )
+        if resp.status_code == 404:
+            return files if files.get("meta.json") else None
+        resp.raise_for_status()
+        json_files = [
+            it
+            for it in resp.json()
+            if it.get("type") == "file"
+            and (it.get("name") or "").endswith(".json")
+            and (it.get("name") or "") != "meta.json"
+        ]
+        total = len(json_files)
+        diag.heartbeat("github_file_list", files=total)
+        for i, item in enumerate(json_files, 1):
+            name = item.get("name") or ""
+            diag.log_loop("github_download_file", i, total, file=name)
+            raw, _ = _github_get_file(name)
+            if raw:
+                files[name] = json.loads(raw)
+        race_n = len(files.get("races.json") or [])
+        print(
+            f"[persist] downloaded files={[k for k in files if k.endswith('.json')]} "
+            f"races={race_n} branch={GITHUB_PERSIST_BRANCH}",
+            flush=True,
+        )
+        return files
 
 
 def sync_to_github(
@@ -762,84 +788,88 @@ def _load_best_snapshot() -> tuple[Optional[dict], str]:
 
 def ensure_data_restored() -> dict:
     """DB が空のとき persist/GitHub から復元（Render 再起動・再ログイン後）"""
-    from db import get_connection, init_db, safe_table_count, table_exists
+    from load_diagnostics import diag, span
 
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    init_db()
+    with span("github.ensure_data_restored"):
+        from db import get_connection, init_db, safe_table_count, table_exists
 
-    conn = get_connection()
-    try:
-        db_races = safe_table_count(conn, "races") if table_exists(conn, "races") else 0
-        db_results = safe_table_count(conn, "results") if table_exists(conn, "results") else 0
-        db_learning = (
-            safe_table_count(conn, "learned_patterns")
-            if table_exists(conn, "learned_patterns")
-            else 0
-        )
-    finally:
-        conn.close()
+        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        init_db()
 
-    if db_races > 0:
-        return {
-            "ok": True,
-            "skipped": True,
-            "reason": "db_not_empty",
-            "race_count": db_races,
-            "result_count": db_results,
-            "learning_count": db_learning,
-        }
+        conn = get_connection()
+        try:
+            db_races = safe_table_count(conn, "races") if table_exists(conn, "races") else 0
+            db_results = safe_table_count(conn, "results") if table_exists(conn, "results") else 0
+            db_learning = (
+                safe_table_count(conn, "learned_patterns")
+                if table_exists(conn, "learned_patterns")
+                else 0
+            )
+        finally:
+            conn.close()
 
-    snapshot, source = _load_best_snapshot()
-    if not snapshot:
-        print(
-            f"[persist] restore failed: no_snapshot branch={GITHUB_PERSIST_BRANCH} "
-            f"github_enabled={is_github_enabled()}",
-            flush=True,
-        )
-        return {
-            "ok": False,
-            "skipped": True,
-            "reason": "no_snapshot",
-            "persist_branch": GITHUB_PERSIST_BRANCH,
-            "race_count": 0,
-            "result_count": 0,
-            "learning_count": 0,
-        }
+        if db_races > 0:
+            diag.heartbeat("ensure_data_restored_skip", db_races=db_races)
+            return {
+                "ok": True,
+                "skipped": True,
+                "reason": "db_not_empty",
+                "race_count": db_races,
+                "result_count": db_results,
+                "learning_count": db_learning,
+            }
 
-    races = snapshot.get("races.json") or []
-    if not races:
-        return {
-            "ok": False,
-            "skipped": True,
-            "reason": "empty_races_json",
-            "race_count": 0,
-            "result_count": 0,
-            "learning_count": 0,
-        }
+        snapshot, source = _load_best_snapshot()
+        if not snapshot:
+            print(
+                f"[persist] restore failed: no_snapshot branch={GITHUB_PERSIST_BRANCH} "
+                f"github_enabled={is_github_enabled()}",
+                flush=True,
+            )
+            return {
+                "ok": False,
+                "skipped": True,
+                "reason": "no_snapshot",
+                "persist_branch": GITHUB_PERSIST_BRANCH,
+                "race_count": 0,
+                "result_count": 0,
+                "learning_count": 0,
+            }
 
-    try:
-        stats = import_snapshot(snapshot)
-        stats["source"] = source
-        stats["ok"] = True
-        stats["skipped"] = False
-        print(
-            f"[persist] restore ok: races={stats.get('race_count')} "
-            f"results={stats.get('result_count')} "
-            f"learning={stats.get('learning_count')} source={source}",
-            flush=True,
-        )
-        return stats
-    except Exception as exc:
-        print(f"[persist] restore import error: {exc}", flush=True)
-        return {
-            "ok": False,
-            "skipped": False,
-            "error": str(exc),
-            "source": source,
-            "race_count": 0,
-            "result_count": 0,
-            "learning_count": 0,
-        }
+        races = snapshot.get("races.json") or []
+        if not races:
+            return {
+                "ok": False,
+                "skipped": True,
+                "reason": "empty_races_json",
+                "race_count": 0,
+                "result_count": 0,
+                "learning_count": 0,
+            }
+
+        try:
+            stats = import_snapshot(snapshot)
+            stats["source"] = source
+            stats["ok"] = True
+            stats["skipped"] = False
+            print(
+                f"[persist] restore ok: races={stats.get('race_count')} "
+                f"results={stats.get('result_count')} "
+                f"learning={stats.get('learning_count')} source={source}",
+                flush=True,
+            )
+            return stats
+        except Exception as exc:
+            print(f"[persist] restore import error: {exc}", flush=True)
+            return {
+                "ok": False,
+                "skipped": False,
+                "error": str(exc),
+                "source": source,
+                "race_count": 0,
+                "result_count": 0,
+                "learning_count": 0,
+            }
 
 
 def get_persist_meta_summary() -> Optional[dict[str, Any]]:

@@ -114,47 +114,55 @@ def get_db_status() -> dict:
 
 def bootstrap_database() -> dict:
     """DB 作成 + GitHub/ローカル復元。例外は握りつぶし結果 dict で返す"""
-    outcome: dict = {
-        "ok": True,
-        "restore": None,
-        "race_count": 0,
-        "result_count": 0,
-        "learning_count": 0,
-        "error": None,
-    }
-    try:
-        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        init_db()
-    except Exception as exc:
-        outcome["ok"] = False
-        outcome["error"] = f"init_db: {exc}"
-        return outcome
+    from load_diagnostics import diag, span
 
-    try:
-        from github_persist import ensure_data_restored
-
-        restore_out = ensure_data_restored()
-        outcome["restore"] = restore_out
-        if restore_out.get("error"):
-            outcome["ok"] = False
-            outcome["error"] = f"restore: {restore_out['error']}"
-    except Exception as exc:
-        outcome["ok"] = False
-        outcome["error"] = f"restore: {exc}"
-
-    try:
-        conn = get_connection()
+    with span("db.bootstrap_database"):
+        outcome: dict = {
+            "ok": True,
+            "restore": None,
+            "race_count": 0,
+            "result_count": 0,
+            "learning_count": 0,
+            "error": None,
+        }
         try:
-            outcome["race_count"] = safe_table_count(conn, "races")
-            outcome["result_count"] = safe_table_count(conn, "results")
-            outcome["learning_count"] = safe_table_count(conn, "learned_patterns")
-        finally:
-            conn.close()
-    except Exception as exc:
-        if outcome["error"] is None:
-            outcome["error"] = f"count: {exc}"
+            DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+            init_db()
+        except Exception as exc:
+            outcome["ok"] = False
+            outcome["error"] = f"init_db: {exc}"
+            return outcome
 
-    return outcome
+        try:
+            from github_persist import ensure_data_restored
+
+            restore_out = ensure_data_restored()
+            outcome["restore"] = restore_out
+            if restore_out.get("error"):
+                outcome["ok"] = False
+                outcome["error"] = f"restore: {restore_out['error']}"
+        except Exception as exc:
+            outcome["ok"] = False
+            outcome["error"] = f"restore: {exc}"
+
+        try:
+            conn = get_connection()
+            try:
+                outcome["race_count"] = safe_table_count(conn, "races")
+                outcome["result_count"] = safe_table_count(conn, "results")
+                outcome["learning_count"] = safe_table_count(conn, "learned_patterns")
+            finally:
+                conn.close()
+        except Exception as exc:
+            if outcome["error"] is None:
+                outcome["error"] = f"count: {exc}"
+
+        diag.heartbeat(
+            "bootstrap_done",
+            races=outcome["race_count"],
+            results=outcome["result_count"],
+        )
+        return outcome
 
 
 def ensure_db() -> None:

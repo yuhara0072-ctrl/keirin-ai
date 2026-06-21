@@ -6,7 +6,7 @@ import pandas as pd
 
 from analyze import SENKO_STYLES, load_entries_frame
 from db import get_connection
-from race_features import update_line_from_api
+from race_features import line_info_needs_api_fetch, update_line_from_api
 
 JIRIKI_STYLES = ("逃", "捲", "両")
 ADVANTAGE_SCORE_THRESHOLD = 52
@@ -262,51 +262,71 @@ def build_all_line_analysis(*, fetch_missing: bool = False) -> tuple[pd.DataFram
 
     fetch_missing=False のとき API 取得をスキップ（UI 読込高速化、DB の line_info のみ使用）
     """
-    entries = load_entries_frame()
-    conn = get_connection()
-    races = pd.read_sql(
-        """
-        SELECT race_id, race_date, venue_name, race_no, line_info, line_count
-        FROM races ORDER BY race_date DESC, race_id
-        """,
-        conn,
-    )
-    conn.close()
+    from load_diagnostics import diag, span
 
-    if races.empty:
-        return pd.DataFrame(), []
+    with span("line_analysis.build_all", fetch_missing=fetch_missing):
+        entries = load_entries_frame()
+        conn = get_connection()
+        races = pd.read_sql(
+            """
+            SELECT race_id, race_date, venue_name, race_no, line_info, line_count
+            FROM races ORDER BY race_date DESC, race_id
+            """,
+            conn,
+        )
+        conn.close()
 
-    race_reports: list[dict] = []
-    line_rows: list[dict] = []
+        if races.empty:
+            return pd.DataFrame(), []
 
-    for _, race in races.iterrows():
-        race_id = race["race_id"]
-        line_info = race.get("line_info") or ""
-        if not line_info or line_info == "不明" or pd.isna(line_info):
-            if fetch_missing:
-                try:
-                    line_info, _ = update_line_from_api(race_id)
-                except Exception:
+        total = len(races)
+        if fetch_missing:
+            missing = int(races["line_info"].apply(line_info_needs_api_fetch).sum())
+            diag.heartbeat(
+                "line_analysis_start", races=total, missing_line_info=missing
+            )
+
+        race_reports: list[dict] = []
+        line_rows: list[dict] = []
+
+        for idx, (_, race) in enumerate(races.iterrows(), 1):
+            race_id = race["race_id"]
+            line_info = race.get("line_info")
+            if line_info_needs_api_fetch(line_info):
+                if fetch_missing:
+                    diag.log_missing_fetch(
+                        "line_analysis",
+                        str(race_id),
+                        index=idx,
+                        total=total,
+                    )
+                    try:
+                        line_info, _ = update_line_from_api(race_id)
+                    except Exception:
+                        line_info = "不明"
+                else:
                     line_info = "不明"
             else:
-                line_info = "不明"
+                line_info = str(line_info).strip()
+            if idx % 20 == 0:
+                diag.log_loop("line_analysis", idx, total)
 
-        report = analyze_race_lines(
-            race_id,
-            str(line_info),
-            entries,
-            str(race.get("venue_name") or ""),
-            int(race.get("race_no") or 0),
-        )
-        report["race_date"] = race.get("race_date")
-        race_reports.append(report)
+            report = analyze_race_lines(
+                race_id,
+                str(line_info),
+                entries,
+                str(race.get("venue_name") or ""),
+                int(race.get("race_no") or 0),
+            )
+            report["race_date"] = race.get("race_date")
+            race_reports.append(report)
 
-        for ln in report["lines"]:
-            row = {k: v for k, v in ln.items() if k != "members_json" and k != "line_reasons"}
-            row["line_reasons"] = " / ".join(ln.get("line_reasons") or [])
-            line_rows.append(row)
+            for ln in report["lines"]:
+                row = {k: v for k, v in ln.items() if k != "members_json" and k != "line_reasons"}
+                row["line_reasons"] = " / ".join(ln.get("line_reasons") or [])
+                line_rows.append(row)
 
-    return pd.DataFrame(line_rows), race_reports
+        return pd.DataFrame(line_rows), race_reports
 
 
 def build_line_analysis_lines(reports: Optional[list[dict]] = None) -> list[str]:

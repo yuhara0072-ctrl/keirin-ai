@@ -20,6 +20,29 @@ from db import db_session, get_connection
 
 MAN_TICKET_YEN = 10_000
 MAN_TICKET_ODDS = 100.0
+UNKNOWN_LINE_INFO = "不明"
+
+
+def line_info_needs_api_fetch(line_info) -> bool:
+    """API 取得が必要な欠損（空・未設定のみ）。'不明' は取得済み扱いで再 API しない。"""
+    if line_info is None:
+        return True
+    if isinstance(line_info, float) and pd.isna(line_info):
+        return True
+    return not str(line_info).strip()
+
+
+def normalize_line_fields(
+    line_info, line_count: int | None = None, *, fetch_missing: bool
+) -> tuple[str, int]:
+    """DB の line 情報を正規化。欠損時は fetch_missing に応じて API または '不明'。"""
+    if not line_info_needs_api_fetch(line_info):
+        info = str(line_info).strip()
+        count = int(line_count or 0)
+        return info, count
+    if fetch_missing:
+        return "", 0
+    return UNKNOWN_LINE_INFO, int(line_count or 0)
 
 
 def db_mtime() -> float:
@@ -100,10 +123,13 @@ def save_line_info(race_id: str, line_info: str, line_count: int) -> None:
 
 
 def update_line_from_api(race_id: str) -> tuple[str, int]:
-    raw = fetch_line_forecast(race_id)
-    line_info, line_count = parse_line_info(raw)
-    save_line_info(race_id, line_info, line_count)
-    return line_info, line_count
+    from load_diagnostics import span
+
+    with span("race_features.update_line_from_api", race_id=race_id):
+        raw = fetch_line_forecast(race_id)
+        line_info, line_count = parse_line_info(raw)
+        save_line_info(race_id, line_info, line_count)
+        return line_info, line_count
 
 
 def _race_odds_snapshot(bet_type: str = "3連単") -> pd.DataFrame:
@@ -132,7 +158,7 @@ def build_race_metrics(bet_type: str = "3連単", *, fetch_missing: bool = True)
     return df.copy()
 
 
-@lru_cache(maxsize=32)
+@lru_cache(maxsize=64)
 def _build_race_metrics_cached(
     bet_type: str, _mtime: float, fetch_missing: bool
 ) -> pd.DataFrame:
@@ -141,104 +167,146 @@ def _build_race_metrics_cached(
 
 def _build_race_metrics_impl(bet_type: str = "3連単", *, fetch_missing: bool = True) -> pd.DataFrame:
     """レース単位のAI指標（キャッシュなし実装）"""
-    entries = load_entries_frame()
-    conn = get_connection()
-    races = pd.read_sql(
-        """
-        SELECT r.race_id, r.race_date, r.venue_name, r.venue_code,
-               r.race_no, r.line_info, r.line_count,
-               res.finish_order, res.trifecta_pay, res.exacta_pay
-        FROM races r
-        LEFT JOIN results res ON r.race_id = res.race_id
-        """,
-        conn,
-    )
-    conn.close()
+    from load_diagnostics import diag, span
 
-    odds = _race_odds_snapshot(bet_type)
-    if races.empty:
-        return pd.DataFrame()
+    with span("race_features.build_race_metrics", fetch_missing=fetch_missing):
+        entries = load_entries_frame()
+        conn = get_connection()
+        races = pd.read_sql(
+            """
+            SELECT r.race_id, r.race_date, r.venue_name, r.venue_code,
+                   r.race_no, r.line_info, r.line_count,
+                   res.finish_order, res.trifecta_pay, res.exacta_pay
+            FROM races r
+            LEFT JOIN results res ON r.race_id = res.race_id
+            """,
+            conn,
+        )
+        conn.close()
 
-    rows: list[dict] = []
-    for race_id, rgroup in races.groupby("race_id"):
-        race = rgroup.iloc[0]
-        ent = entries[entries["race_id"] == race_id]
-        nige_count = int((ent["style"] == "逃").sum()) if not ent.empty else 0
-        senko_count = int(ent["style"].isin(SENKO_STYLES).sum()) if not ent.empty else 0
+        odds = _race_odds_snapshot(bet_type)
+        if races.empty:
+            return pd.DataFrame()
 
-        line_info = race.get("line_info") or ""
-        line_count = int(race.get("line_count") or 0)
-        if not line_info or line_info == "不明" or pd.isna(line_info):
-            if fetch_missing:
-                try:
-                    line_info, line_count = update_line_from_api(race_id)
-                except Exception:
-                    line_info, line_count = "不明", 0
-            else:
-                line_info, line_count = "不明", 0
-
-        ro = odds[odds["race_id"] == race_id]
-        fav_combo = ""
-        fav_odds = None
-        ninki_concentration = 0.0
-        are_index = 0.0
-        if not ro.empty:
-            ro = ro.copy()
-            ro["implied"] = 1.0 / ro["odds"]
-            total = ro["implied"].sum()
-            fav_row = ro.loc[ro["odds"].idxmin()]
-            fav_combo = str(fav_row["combination"])
-            fav_odds = float(fav_row["odds"])
-            ninki_concentration = round(float(fav_row["implied"] / total * 100), 1) if total else 0
-            cv = ro["odds"].std() / ro["odds"].mean() if ro["odds"].mean() else 0
-            are_index = round(min(100.0, (1 - fav_row["implied"] / total) * 50 + cv * 30), 1)
-
-        finish_order = race.get("finish_order")
-        honmei_settle = False
-        man_ticket = False
-        winner_rank = None
-        trifecta_pay = race.get("trifecta_pay")
-        win_row = pd.DataFrame()
-        if pd.notna(finish_order) and fav_combo and not ro.empty:
-            wins = winning_combinations(bet_type, str(finish_order))
-            honmei_settle = fav_combo in wins
-            if wins:
-                win_combo = next(iter(wins))
-                win_row = ro[ro["combination"] == win_combo]
-                if not win_row.empty:
-                    winner_rank = int(
-                        ro["odds"].rank(method="first", ascending=True).loc[win_row.index[0]]
-                    )
-            if pd.notna(trifecta_pay):
-                man_ticket = int(trifecta_pay) >= MAN_TICKET_YEN
-            elif not win_row.empty:
-                win_odds = float(win_row["odds"].iloc[0])
-                man_ticket = win_odds >= MAN_TICKET_ODDS or (
-                    winner_rank is not None and winner_rank >= 7
+        race_ids = races["race_id"].unique()
+        total = len(race_ids)
+        if fetch_missing:
+            missing = int(
+                races.groupby("race_id")
+                .first()["line_info"]
+                .apply(line_info_needs_api_fetch)
+                .sum()
+            )
+            diag.heartbeat(
+                "build_race_metrics_start",
+                races=total,
+                missing_line_info=missing,
+                fetch_missing=fetch_missing,
+            )
+            if missing >= 20:
+                diag.warn(
+                    f"build_race_metrics will fetch {missing} line_info via API "
+                    f"(~{missing}s sleep minimum)"
                 )
 
-        rows.append(
-            {
-                "race_id": race_id,
-                "race_date": race["race_date"],
-                "venue_name": race["venue_name"],
-                "race_no": race["race_no"],
-                "line_info": line_info,
-                "line_count": line_count,
-                "nige_count": nige_count,
-                "senko_count": senko_count,
-                "ninki_concentration": ninki_concentration,
-                "are_index": are_index,
-                "fav_combo": fav_combo,
-                "fav_odds": fav_odds,
-                "honmei_settle": honmei_settle,
-                "man_ticket": man_ticket,
-                "winner_ninki_rank": winner_rank,
-                "trifecta_pay": int(trifecta_pay) if pd.notna(trifecta_pay) else None,
-            }
-        )
+        rows: list[dict] = []
+        for idx, (race_id, rgroup) in enumerate(races.groupby("race_id"), 1):
+            race = rgroup.iloc[0]
+            if fetch_missing and idx % 10 == 0:
+                diag.log_loop("build_race_metrics", idx, total, race_id=race_id)
+            ent = entries[entries["race_id"] == race_id]
+            nige_count = int((ent["style"] == "逃").sum()) if not ent.empty else 0
+            senko_count = int(ent["style"].isin(SENKO_STYLES).sum()) if not ent.empty else 0
 
-    return pd.DataFrame(rows)
+            line_info = race.get("line_info")
+            line_count = int(race.get("line_count") or 0)
+            if line_info_needs_api_fetch(line_info):
+                if fetch_missing:
+                    diag.log_missing_fetch(
+                        "build_race_metrics",
+                        str(race_id),
+                        index=idx,
+                        total=total,
+                    )
+                    try:
+                        line_info, line_count = update_line_from_api(race_id)
+                    except Exception:
+                        line_info, line_count = UNKNOWN_LINE_INFO, 0
+                else:
+                    line_info, line_count = UNKNOWN_LINE_INFO, 0
+            else:
+                line_info, line_count = normalize_line_fields(
+                    line_info, line_count, fetch_missing=False
+                )
+
+            ro = odds[odds["race_id"] == race_id]
+            fav_combo = ""
+            fav_odds = None
+            ninki_concentration = 0.0
+            are_index = 0.0
+            if not ro.empty:
+                ro = ro.copy()
+                ro["implied"] = 1.0 / ro["odds"]
+                implied_total = ro["implied"].sum()
+                fav_row = ro.loc[ro["odds"].idxmin()]
+                fav_combo = str(fav_row["combination"])
+                fav_odds = float(fav_row["odds"])
+                ninki_concentration = (
+                    round(float(fav_row["implied"] / implied_total * 100), 1)
+                    if implied_total
+                    else 0
+                )
+                cv = ro["odds"].std() / ro["odds"].mean() if ro["odds"].mean() else 0
+                are_index = round(
+                    min(100.0, (1 - fav_row["implied"] / implied_total) * 50 + cv * 30), 1
+                )
+
+            finish_order = race.get("finish_order")
+            honmei_settle = False
+            man_ticket = False
+            winner_rank = None
+            trifecta_pay = race.get("trifecta_pay")
+            win_row = pd.DataFrame()
+            if pd.notna(finish_order) and fav_combo and not ro.empty:
+                wins = winning_combinations(bet_type, str(finish_order))
+                honmei_settle = fav_combo in wins
+                if wins:
+                    win_combo = next(iter(wins))
+                    win_row = ro[ro["combination"] == win_combo]
+                    if not win_row.empty:
+                        winner_rank = int(
+                            ro["odds"].rank(method="first", ascending=True).loc[win_row.index[0]]
+                        )
+                if pd.notna(trifecta_pay):
+                    man_ticket = int(trifecta_pay) >= MAN_TICKET_YEN
+                elif not win_row.empty:
+                    win_odds = float(win_row["odds"].iloc[0])
+                    man_ticket = win_odds >= MAN_TICKET_ODDS or (
+                        winner_rank is not None and winner_rank >= 7
+                    )
+
+            rows.append(
+                {
+                    "race_id": race_id,
+                    "race_date": race["race_date"],
+                    "venue_name": race["venue_name"],
+                    "race_no": race["race_no"],
+                    "line_info": line_info,
+                    "line_count": line_count,
+                    "nige_count": nige_count,
+                    "senko_count": senko_count,
+                    "ninki_concentration": ninki_concentration,
+                    "are_index": are_index,
+                    "fav_combo": fav_combo,
+                    "fav_odds": fav_odds,
+                    "honmei_settle": honmei_settle,
+                    "man_ticket": man_ticket,
+                    "winner_ninki_rank": winner_rank,
+                    "trifecta_pay": int(trifecta_pay) if pd.notna(trifecta_pay) else None,
+                }
+            )
+
+        return pd.DataFrame(rows)
 
 
 def venue_trends(metrics: pd.DataFrame) -> pd.DataFrame:
@@ -280,7 +348,9 @@ def recovery_by_feature(
     metrics: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     """特徴量別回収率"""
-    m = metrics if metrics is not None else build_race_metrics(bet_type)
+    m = metrics if metrics is not None else build_race_metrics(
+        bet_type, fetch_missing=False
+    )
     df = load_bet_frame(bet_type=bet_type)
     if df.empty or m.empty:
         return pd.DataFrame()

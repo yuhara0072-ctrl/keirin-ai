@@ -299,175 +299,199 @@ def cached_system_check_bundle(bet_type: str, deep: bool, _mtime: float) -> dict
 
 def build_full_app_bundles(bet_type: str) -> dict:
     """全バンドル一括読込 — scores 共有・fetch_missing=False・並列取得（load_app_bundles 経路）"""
-    from config import TARGET_RACES
-    from detect_anomaly import detect_all
-    from report import build_analyze_lines
+    from load_diagnostics import diag, span
 
-    from advanced_learning import get_advanced_learning_bundle
-    from ai_insights import get_ai_insights_bundle
-    from ai_recommend import get_ai_recommend_bundle
-    from ai_score import get_ai_score_bundle
-    from backup import get_backup_bundle
-    from battle_judge import get_battle_judge_bundle
-    from bet_tracker import get_pnl_bundle
-    from bulk_collect import get_collect_bundle
-    from charts import HIGH_SCORE_DEFAULT, get_charts_bundle
-    from data_quality import get_quality_bundle
-    from improvement_ai import get_improvement_bundle
-    from learning import get_learning_bundle
-    from line_analysis import get_line_analysis_bundle
-    from market_monitor import get_market_monitor_bundle
-    from ml_model import get_ml_bundle
-    from notifications import get_notification_bundle
-    from ops import get_ops_status
-    from pre_race import get_pre_race_bundle
-    from validation_report import get_validation_bundle
-    from bankroll import get_bankroll_bundle
+    with span("bundle.build_full_app_bundles", bet_type=bet_type):
+        from config import TARGET_RACES
+        from detect_anomaly import detect_all
+        from report import build_analyze_lines
 
-    score_bundle = get_ai_score_bundle(bet_type)
-    scores = score_bundle["scores"]
-    recommend_bundle = get_ai_recommend_bundle(bet_type, scores=scores)
+        from advanced_learning import get_advanced_learning_bundle
+        from ai_insights import get_ai_insights_bundle
+        from ai_recommend import get_ai_recommend_bundle
+        from ai_score import get_ai_score_bundle
+        from backup import get_backup_bundle
+        from battle_judge import get_battle_judge_bundle
+        from bet_tracker import get_pnl_bundle
+        from bulk_collect import get_collect_bundle
+        from charts import HIGH_SCORE_DEFAULT, get_charts_bundle
+        from data_quality import get_quality_bundle
+        from improvement_ai import get_improvement_bundle
+        from learning import get_learning_bundle
+        from line_analysis import get_line_analysis_bundle
+        from market_monitor import get_market_monitor_bundle
+        from ml_model import get_ml_bundle
+        from notifications import get_notification_bundle
+        from ops import get_ops_status
+        from pre_race import get_pre_race_bundle
+        from validation_report import get_validation_bundle
+        from bankroll import get_bankroll_bundle
 
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        f_pre = pool.submit(get_pre_race_bundle, bet_type)
-        f_market = pool.submit(get_market_monitor_bundle, bet_type)
-        f_learning = pool.submit(lambda: get_learning_bundle(bet_type, refresh=True))
-        f_quality = pool.submit(get_quality_bundle, bet_type)
-        f_advanced = pool.submit(get_advanced_learning_bundle, bet_type, retrain=False)
-        f_line = pool.submit(get_line_analysis_bundle, fetch_missing=False)
-        f_ml = pool.submit(get_ml_bundle, bet_type, scores, retrain=False)
-        f_backup = pool.submit(get_backup_bundle)
-        f_charts = pool.submit(
-            lambda: get_charts_bundle(
-                bet_type, HIGH_SCORE_DEFAULT, scores=scores
+        with span("bundle.score_bundle"):
+            score_bundle = get_ai_score_bundle(bet_type)
+        scores = score_bundle["scores"]
+        with span("bundle.recommend_bundle"):
+            recommend_bundle = get_ai_recommend_bundle(bet_type, scores=scores)
+
+        with span("bundle.parallel_deps"):
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                f_pre = pool.submit(get_pre_race_bundle, bet_type)
+                f_market = pool.submit(get_market_monitor_bundle, bet_type)
+                f_learning = pool.submit(lambda: get_learning_bundle(bet_type, refresh=True))
+                f_quality = pool.submit(get_quality_bundle, bet_type)
+                f_advanced = pool.submit(get_advanced_learning_bundle, bet_type, retrain=False)
+                f_line = pool.submit(get_line_analysis_bundle, fetch_missing=False)
+                f_ml = pool.submit(get_ml_bundle, bet_type, scores, retrain=False)
+                f_backup = pool.submit(get_backup_bundle)
+                f_charts = pool.submit(
+                    lambda: get_charts_bundle(
+                        bet_type, HIGH_SCORE_DEFAULT, scores=scores
+                    )
+                )
+
+                with span("bundle.wait.pre_race"):
+                    pre_race_bundle = f_pre.result()
+                with span("bundle.wait.market"):
+                    market_bundle = f_market.result()
+                with span("bundle.wait.learning"):
+                    learning_bundle = f_learning.result()
+                with span("bundle.wait.quality"):
+                    quality_bundle = f_quality.result()
+                with span("bundle.wait.advanced"):
+                    advanced_bundle = f_advanced.result()
+                with span("bundle.wait.line"):
+                    line_bundle = f_line.result()
+                with span("bundle.wait.ml"):
+                    ml_bundle = f_ml.result()
+                with span("bundle.wait.backup"):
+                    backup_bundle = f_backup.result()
+                with span("bundle.wait.charts"):
+                    charts_bundle = f_charts.result()
+
+        with span("bundle.battle_bundle"):
+            battle_bundle = get_battle_judge_bundle(
+                bet_type,
+                scores=scores,
+                market=market_bundle,
+                line=line_bundle,
+                pre_race=pre_race_bundle,
+                ml=ml_bundle,
+                quality=quality_bundle,
+                advanced=advanced_bundle,
             )
-        )
+        with span("bundle.bankroll_bundle"):
+            bankroll_bundle = get_bankroll_bundle(bet_type, battle_bundle=battle_bundle)
+        with span("bundle.validation_bundle", sync_virtual=True):
+            validation_bundle = get_validation_bundle(
+                bet_type,
+                battle_bundle=battle_bundle,
+                bankroll_plan=bankroll_bundle,
+                sync_virtual=True,
+            )
 
-        pre_race_bundle = f_pre.result()
-        market_bundle = f_market.result()
-        learning_bundle = f_learning.result()
-        quality_bundle = f_quality.result()
-        advanced_bundle = f_advanced.result()
-        line_bundle = f_line.result()
-        ml_bundle = f_ml.result()
-        backup_bundle = f_backup.result()
-        charts_bundle = f_charts.result()
-
-    battle_bundle = get_battle_judge_bundle(
-        bet_type,
-        scores=scores,
-        market=market_bundle,
-        line=line_bundle,
-        pre_race=pre_race_bundle,
-        ml=ml_bundle,
-        quality=quality_bundle,
-        advanced=advanced_bundle,
-    )
-    bankroll_bundle = get_bankroll_bundle(bet_type, battle_bundle=battle_bundle)
-    validation_bundle = get_validation_bundle(
-        bet_type,
-        battle_bundle=battle_bundle,
-        bankroll_plan=bankroll_bundle,
-        sync_virtual=True,
-    )
-
-    return {
-        "analyze_text": "\n".join(build_analyze_lines(bet_type)),
-        "ai_bundle": get_ai_insights_bundle(bet_type, fetch_missing=False),
-        "score_bundle": score_bundle,
-        "recommend_bundle": recommend_bundle,
-        "ops_status": get_ops_status(
-            bet_type,
-            fast=True,
-            targets_count=len(recommend_bundle.get("targets") or []),
-        ),
-        "charts_bundle": charts_bundle,
-        "line_bundle": line_bundle,
-        "market_bundle": market_bundle,
-        "learning_bundle": learning_bundle,
-        "pre_race_bundle": pre_race_bundle,
-        "ml_bundle": ml_bundle,
-        "notify_bundle": get_notification_bundle(
-            bet_type,
-            scores=scores,
-            recommend=recommend_bundle,
-            pre_race=pre_race_bundle,
-            market=market_bundle,
-            persist=True,
-        ),
-        "backup_bundle": backup_bundle,
-        "pnl_bundle": get_pnl_bundle(
-            bet_type, recommend=recommend_bundle, sync_virtual=False
-        ),
-        "collect_bundle": get_collect_bundle(TARGET_RACES),
-        "quality_bundle": quality_bundle,
-        "advanced_bundle": advanced_bundle,
-        "battle_bundle": battle_bundle,
-        "bankroll_bundle": bankroll_bundle,
-        "validation_bundle": validation_bundle,
-        "improvement_bundle": get_improvement_bundle(
-            bet_type,
-            validation=validation_bundle,
-            bankroll_plan=bankroll_bundle,
-            quality=quality_bundle,
-            advanced=advanced_bundle,
-        ),
-        "detect_df": detect_all(bet_type),
-    }
+        with span("bundle.tail_bundles"):
+            result = {
+                "analyze_text": "\n".join(build_analyze_lines(bet_type)),
+                "ai_bundle": get_ai_insights_bundle(bet_type, fetch_missing=False),
+                "score_bundle": score_bundle,
+                "recommend_bundle": recommend_bundle,
+                "ops_status": get_ops_status(
+                    bet_type,
+                    fast=True,
+                    targets_count=len(recommend_bundle.get("targets") or []),
+                ),
+                "charts_bundle": charts_bundle,
+                "line_bundle": line_bundle,
+                "market_bundle": market_bundle,
+                "learning_bundle": learning_bundle,
+                "pre_race_bundle": pre_race_bundle,
+                "ml_bundle": ml_bundle,
+                "notify_bundle": get_notification_bundle(
+                    bet_type,
+                    scores=scores,
+                    recommend=recommend_bundle,
+                    pre_race=pre_race_bundle,
+                    market=market_bundle,
+                    persist=True,
+                ),
+                "backup_bundle": backup_bundle,
+                "pnl_bundle": get_pnl_bundle(
+                    bet_type, recommend=recommend_bundle, sync_virtual=False
+                ),
+                "collect_bundle": get_collect_bundle(TARGET_RACES),
+                "quality_bundle": quality_bundle,
+                "advanced_bundle": advanced_bundle,
+                "battle_bundle": battle_bundle,
+                "bankroll_bundle": bankroll_bundle,
+                "validation_bundle": validation_bundle,
+                "improvement_bundle": get_improvement_bundle(
+                    bet_type,
+                    validation=validation_bundle,
+                    bankroll_plan=bankroll_bundle,
+                    quality=quality_bundle,
+                    advanced=advanced_bundle,
+                ),
+                "detect_df": detect_all(bet_type),
+            }
+        diag.summary("build_full_app_bundles")
+        return result
 
 
 def load_tab_bundle(tab_key: str, bet_type: str, *, deep_check: bool = False) -> None:
     """タブ単位で必要なバンドルのみ読込（GitHub 復元は ensure_db_ready 側）"""
     from auth import ensure_db_ready
+    from load_diagnostics import diag, span
 
-    ensure_db_ready(force_restore=True)
-    mtime = db_mtime()
+    with span("bundle.load_tab_bundle", tab=tab_key, deep_check=deep_check):
+        ensure_db_ready(force_restore=False)
+        mtime = db_mtime()
 
-    loaders = {
-        "rec": lambda: {
-            "score_bundle": cached_ai_score_bundle(bet_type, mtime),
-            "recommend_bundle": cached_ai_recommend_bundle(bet_type, mtime),
-        },
-        "battle": lambda: {"battle_bundle": cached_battle_judge_bundle(bet_type, mtime)},
-        "line": lambda: {"line_bundle": cached_line_bundle(mtime)},
-        "predict_ai": lambda: {"ai_bundle": cached_ai_insights_bundle(bet_type, mtime)},
-        "predict_ml": lambda: {"ml_bundle": cached_ml_bundle(bet_type, mtime)},
-        "predict_prerace": lambda: {"pre_race_bundle": cached_pre_race_bundle(bet_type, mtime)},
-        "predict_chart": lambda: {
-            "charts_bundle": cached_charts_bundle(bet_type, 70, mtime),
-            "score_bundle": cached_ai_score_bundle(bet_type, mtime),
-        },
-        "market": lambda: {"market_bundle": cached_market_bundle(bet_type, mtime)},
-        "bankroll": lambda: {
-            "bankroll_bundle": cached_bankroll_bundle(bet_type, mtime),
-            "battle_bundle": cached_battle_judge_bundle(bet_type, mtime),
-        },
-        "validation": lambda: {"validation_bundle": cached_validation_bundle(bet_type, mtime)},
-        "improve": lambda: {"improvement_bundle": cached_improvement_bundle(bet_type, mtime)},
-        "pnl": lambda: {
-            "pnl_bundle": cached_pnl_bundle(bet_type, mtime),
-            "recommend_bundle": cached_ai_recommend_bundle(bet_type, mtime),
-        },
-        "learn": lambda: {"learning_bundle": cached_learning_bundle(bet_type, False, mtime)},
-        "advanced": lambda: {"advanced_bundle": cached_advanced_bundle(bet_type, mtime)},
-        "quality": lambda: {"quality_bundle": cached_quality_bundle(bet_type, mtime)},
-        "collect": lambda: {"collect_bundle": cached_collect_bundle(100, mtime)},
-        "backup": lambda: {"backup_bundle": cached_backup_bundle(mtime)},
-        "check": lambda: {
-            "system_check_bundle": cached_system_check_bundle(
-                bet_type, deep_check, mtime
-            )
-        },
-        "settings_ops": lambda: {"ops_status": cached_ops_status(bet_type, mtime)},
-    }
+        loaders = {
+            "rec": lambda: {
+                "score_bundle": cached_ai_score_bundle(bet_type, mtime),
+                "recommend_bundle": cached_ai_recommend_bundle(bet_type, mtime),
+            },
+            "battle": lambda: {"battle_bundle": cached_battle_judge_bundle(bet_type, mtime)},
+            "line": lambda: {"line_bundle": cached_line_bundle(mtime)},
+            "predict_ai": lambda: {"ai_bundle": cached_ai_insights_bundle(bet_type, mtime)},
+            "predict_ml": lambda: {"ml_bundle": cached_ml_bundle(bet_type, mtime)},
+            "predict_prerace": lambda: {"pre_race_bundle": cached_pre_race_bundle(bet_type, mtime)},
+            "predict_chart": lambda: {
+                "charts_bundle": cached_charts_bundle(bet_type, 70, mtime),
+                "score_bundle": cached_ai_score_bundle(bet_type, mtime),
+            },
+            "market": lambda: {"market_bundle": cached_market_bundle(bet_type, mtime)},
+            "bankroll": lambda: {
+                "bankroll_bundle": cached_bankroll_bundle(bet_type, mtime),
+                "battle_bundle": cached_battle_judge_bundle(bet_type, mtime),
+            },
+            "validation": lambda: {"validation_bundle": cached_validation_bundle(bet_type, mtime)},
+            "improve": lambda: {"improvement_bundle": cached_improvement_bundle(bet_type, mtime)},
+            "pnl": lambda: {
+                "pnl_bundle": cached_pnl_bundle(bet_type, mtime),
+                "recommend_bundle": cached_ai_recommend_bundle(bet_type, mtime),
+            },
+            "learn": lambda: {"learning_bundle": cached_learning_bundle(bet_type, False, mtime)},
+            "advanced": lambda: {"advanced_bundle": cached_advanced_bundle(bet_type, mtime)},
+            "quality": lambda: {"quality_bundle": cached_quality_bundle(bet_type, mtime)},
+            "collect": lambda: {"collect_bundle": cached_collect_bundle(100, mtime)},
+            "backup": lambda: {"backup_bundle": cached_backup_bundle(mtime)},
+            "check": lambda: {
+                "system_check_bundle": cached_system_check_bundle(
+                    bet_type, deep_check, mtime
+                )
+            },
+            "settings_ops": lambda: {"ops_status": cached_ops_status(bet_type, mtime)},
+        }
 
-    loader = loaders.get(tab_key)
-    if loader is None:
-        _mark_tab_loaded(tab_key, {})
-        return
+        loader = loaders.get(tab_key)
+        if loader is None:
+            _mark_tab_loaded(tab_key, {})
+            return
 
-    with st.spinner("読み込み中..."):
-        _mark_tab_loaded(tab_key, loader())
+        with st.spinner("読み込み中..."):
+            _mark_tab_loaded(tab_key, loader())
+        diag.summary(f"load_tab_bundle:{tab_key}")
 
 
 def prompt_load_tab(tab_label: str, tab_key: str, bet_type: str) -> bool:

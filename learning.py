@@ -136,7 +136,7 @@ def compute_learning_patterns(bet_type: str = "3連単") -> pd.DataFrame:
             )
         )
 
-    metrics = build_race_metrics(bet_type)
+    metrics = build_race_metrics(bet_type, fetch_missing=False)
     line_df = recovery_by_feature(bet_type, "line_count", metrics)
     for row in line_df.itertuples():
         if row.races < MIN_RACES_FOR_LEARN:
@@ -192,7 +192,10 @@ def compute_learning_patterns(bet_type: str = "3連単") -> pd.DataFrame:
 
 def save_learned_patterns(bet_type: str = "3連単") -> int:
     """学習結果を DB に保存"""
-    patterns = compute_learning_patterns(bet_type)
+    from load_diagnostics import diag, span
+
+    with span("learning.save_learned_patterns", bet_type=bet_type):
+        patterns = compute_learning_patterns(bet_type)
     with db_session() as conn:
         migrate_learning_table(conn)
         conn.execute("DELETE FROM learned_patterns WHERE bet_type = ?", (bet_type,))
@@ -342,37 +345,40 @@ def apply_learning_adjustment(
 
 def get_learning_bundle(bet_type: str = "3連単", *, refresh: bool = True) -> dict:
     """Streamlit / レポート用"""
-    bet_df = load_bet_frame(bet_type=bet_type)
-    result_count = bet_df["race_id"].nunique() if not bet_df.empty else 0
+    from load_diagnostics import span
 
-    if refresh or load_learned_patterns(bet_type).empty:
-        saved = save_learned_patterns(bet_type)
-    else:
-        saved = len(load_learned_patterns(bet_type))
+    with span("learning.get_learning_bundle", refresh=refresh):
+        bet_df = load_bet_frame(bet_type=bet_type)
+        result_count = bet_df["race_id"].nunique() if not bet_df.empty else 0
 
-    patterns = load_learned_patterns(bet_type)
-    venue_df = patterns[patterns["category"] == "venue"].sort_values(
-        "recovery_rate", ascending=False
-    )
+        if refresh or load_learned_patterns(bet_type).empty:
+            saved = save_learned_patterns(bet_type)
+        else:
+            saved = len(load_learned_patterns(bet_type))
 
-    high = patterns[patterns["recovery_rate"] >= HIGH_RECOVERY].head(10)
-    low = patterns[patterns["recovery_rate"] <= LOW_RECOVERY].sort_values(
-        "recovery_rate"
-    ).head(10)
+        patterns = load_learned_patterns(bet_type)
+        venue_df = patterns[patterns["category"] == "venue"].sort_values(
+            "recovery_rate", ascending=False
+        )
 
-    return {
-        "has_data": not patterns.empty,
-        "result_races": result_count,
-        "learning_count": len(patterns),
-        "saved_count": saved,
-        "patterns": patterns,
-        "high_recovery_top10": high,
-        "low_recovery_top10": low,
-        "venue_performance": venue_df,
-        "updated_at": (
-            patterns["updated_at"].iloc[0] if not patterns.empty else ""
-        ),
-    }
+        high = patterns[patterns["recovery_rate"] >= HIGH_RECOVERY].head(10)
+        low = patterns[patterns["recovery_rate"] <= LOW_RECOVERY].sort_values(
+            "recovery_rate"
+        ).head(10)
+
+        return {
+            "has_data": not patterns.empty,
+            "result_races": result_count,
+            "learning_count": len(patterns),
+            "saved_count": saved,
+            "patterns": patterns,
+            "high_recovery_top10": high,
+            "low_recovery_top10": low,
+            "venue_performance": venue_df,
+            "updated_at": (
+                patterns["updated_at"].iloc[0] if not patterns.empty else ""
+            ),
+        }
 
 
 def build_learning_applied_frame(scores: pd.DataFrame) -> pd.DataFrame:

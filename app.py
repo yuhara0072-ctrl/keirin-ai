@@ -313,17 +313,21 @@ def load_app_bundles_cached(
     deep_check: bool = False,
     show_spinner: bool = True,
 ) -> tuple[dict, str | None]:
+    from load_diagnostics import diag, span
+
     cache_key = f"bundles_{bet_type}_{deep_check}"
     if cache_key in st.session_state:
         return st.session_state[cache_key]
     try:
-        if show_spinner:
-            with st.spinner("詳細データを読み込み中..."):
+        with span("app.load_app_bundles_cached", deep_check=deep_check):
+            if show_spinner:
+                with st.spinner("詳細データを読み込み中..."):
+                    bundles, err = load_app_bundles_safe(bet_type, deep_check=deep_check)
+            else:
                 bundles, err = load_app_bundles_safe(bet_type, deep_check=deep_check)
-        else:
-            bundles, err = load_app_bundles_safe(bet_type, deep_check=deep_check)
-        st.session_state[cache_key] = (bundles, err)
-        return bundles, err
+            st.session_state[cache_key] = (bundles, err)
+            diag.summary("load_app_bundles_cached")
+            return bundles, err
     except Exception as exc:
         print(f"[app] bundle cache error: {exc}", flush=True)
         bundles, err = load_app_bundles_safe(bet_type, deep_check=deep_check)
@@ -508,6 +512,10 @@ st.set_page_config(
     layout="centered",
     initial_sidebar_state="expanded",
 )
+
+from load_diagnostics import install_load_diagnostics, span as load_span, diag as load_diag
+
+install_load_diagnostics()
 
 inject_mobile_style()
 

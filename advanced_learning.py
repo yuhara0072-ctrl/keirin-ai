@@ -111,7 +111,7 @@ def load_valid_bet_frame(bet_type: str = "3連単") -> pd.DataFrame:
 
 
 def _filtered_metrics(bet_type: str, valid_ids: set[str]) -> pd.DataFrame:
-    metrics = build_race_metrics(bet_type)
+    metrics = build_race_metrics(bet_type, fetch_missing=False)
     if metrics.empty or not valid_ids:
         return pd.DataFrame()
     return metrics[metrics["race_id"].isin(valid_ids)].copy()
@@ -510,6 +510,9 @@ def load_advanced_meta(bet_type: str = "3連単") -> dict:
 
 def run_advanced_learning(bet_type: str = "3連単") -> dict:
     """本格学習パイプライン"""
+    from load_diagnostics import diag
+
+    diag._log(f"ENTER advanced_learning.run_advanced_learning bet_type={bet_type}")
     started = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     valid_ids = get_valid_race_ids(bet_type)
     bet_df = load_valid_bet_frame(bet_type)
@@ -612,46 +615,49 @@ def get_advanced_learning_bundle(
     *,
     retrain: bool = False,
 ) -> dict:
-    patterns = load_advanced_patterns(bet_type)
-    meta_file = load_advanced_meta(bet_type)
-    train_result: dict[str, Any] = {}
+    from load_diagnostics import span
 
-    valid_ids = get_valid_race_ids(bet_type)
-    if retrain:
-        train_result = run_advanced_learning(bet_type)
+    with span("advanced_learning.get_bundle", retrain=retrain):
         patterns = load_advanced_patterns(bet_type)
         meta_file = load_advanced_meta(bet_type)
+        train_result: dict[str, Any] = {}
 
-    high = patterns[patterns["recovery_rate"] >= HIGH_EXTRACT].head(10) if not patterns.empty else pd.DataFrame()
-    low = (
-        patterns[patterns["recovery_rate"] <= LOW_EXCLUDE].sort_values("recovery_rate").head(10)
-        if not patterns.empty
-        else pd.DataFrame()
-    )
-    importance = _feature_importance_from_patterns(patterns)
+        valid_ids = get_valid_race_ids(bet_type)
+        if retrain:
+            train_result = run_advanced_learning(bet_type)
+            patterns = load_advanced_patterns(bet_type)
+            meta_file = load_advanced_meta(bet_type)
 
-    meta = meta_file.get("meta", meta_file)
-    return {
-        "has_data": not patterns.empty,
-        "has_model": bool(meta_file),
-        "can_train": len(valid_ids) >= MIN_VALID_RACES,
-        "n_valid_races": len(valid_ids),
-        "min_valid_races": MIN_VALID_RACES,
-        "n_patterns": len(patterns),
-        "before_recovery": meta.get("before_recovery"),
-        "after_predicted_recovery": meta.get("after_predicted_recovery"),
-        "score_correlation_before": meta.get("score_correlation_before"),
-        "score_correlation_after": meta.get("score_correlation_after"),
-        "weights": get_score_weights(bet_type),
-        "feature_importance": importance,
-        "high_recovery_top10": high,
-        "low_recovery_top10": low,
-        "excluded_count": int(patterns["excluded"].sum()) if not patterns.empty and "excluded" in patterns.columns else 0,
-        "patterns": patterns,
-        "train_result": train_result,
-        "trained_at": meta_file.get("trained_at", ""),
-        "model_path": advanced_model_path(bet_type) if meta_file else "",
-    }
+        high = patterns[patterns["recovery_rate"] >= HIGH_EXTRACT].head(10) if not patterns.empty else pd.DataFrame()
+        low = (
+            patterns[patterns["recovery_rate"] <= LOW_EXCLUDE].sort_values("recovery_rate").head(10)
+            if not patterns.empty
+            else pd.DataFrame()
+        )
+        importance = _feature_importance_from_patterns(patterns)
+
+        meta = meta_file.get("meta", meta_file)
+        return {
+            "has_data": not patterns.empty,
+            "has_model": bool(meta_file),
+            "can_train": len(valid_ids) >= MIN_VALID_RACES,
+            "n_valid_races": len(valid_ids),
+            "min_valid_races": MIN_VALID_RACES,
+            "n_patterns": len(patterns),
+            "before_recovery": meta.get("before_recovery"),
+            "after_predicted_recovery": meta.get("after_predicted_recovery"),
+            "score_correlation_before": meta.get("score_correlation_before"),
+            "score_correlation_after": meta.get("score_correlation_after"),
+            "weights": get_score_weights(bet_type),
+            "feature_importance": importance,
+            "high_recovery_top10": high,
+            "low_recovery_top10": low,
+            "excluded_count": int(patterns["excluded"].sum()) if not patterns.empty and "excluded" in patterns.columns else 0,
+            "patterns": patterns,
+            "train_result": train_result,
+            "trained_at": meta_file.get("trained_at", ""),
+            "model_path": advanced_model_path(bet_type) if meta_file else "",
+        }
 
 
 def build_advanced_learning_lines(bet_type: str = "3連単") -> list[str]:

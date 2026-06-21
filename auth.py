@@ -238,24 +238,28 @@ def _race_count_safe() -> int:
 
 def run_login_bootstrap() -> dict:
     """ログイン直後の DB 初期化・GitHub 復元（例外でも認証は維持）"""
-    print("[auth] restore start", flush=True)
-    outcome: dict = {"ok": True, "restore": None, "race_count": 0, "error": None}
-    try:
-        from db import bootstrap_database
+    from load_diagnostics import diag, span
 
-        outcome = bootstrap_database()
-    except Exception as exc:
-        outcome = {"ok": False, "restore": None, "race_count": 0, "error": str(exc)}
-        print(f"[auth] bootstrap error: {exc}", flush=True)
+    with span("auth.run_login_bootstrap"):
+        print("[auth] restore start", flush=True)
+        outcome: dict = {"ok": True, "restore": None, "race_count": 0, "error": None}
+        try:
+            from db import bootstrap_database
 
-    restore = outcome.get("restore")
-    print(f"[auth] restore result: {restore if restore is not None else 'none'}", flush=True)
-    print(f"[auth] db race count: {outcome.get('race_count', 0)}", flush=True)
+            outcome = bootstrap_database()
+        except Exception as exc:
+            outcome = {"ok": False, "restore": None, "race_count": 0, "error": str(exc)}
+            print(f"[auth] bootstrap error: {exc}", flush=True)
 
-    # DB にデータが入ったときだけ「準備完了」とする（空のまま再試行可能に）
-    if outcome.get("race_count", 0) > 0 or (restore or {}).get("skipped"):
-        st.session_state[SESSION_DB_BOOTSTRAPPED] = True
-    return outcome
+        restore = outcome.get("restore")
+        print(f"[auth] restore result: {restore if restore is not None else 'none'}", flush=True)
+        print(f"[auth] db race count: {outcome.get('race_count', 0)}", flush=True)
+
+        # DB にデータが入ったときだけ「準備完了」とする（空のまま再試行可能に）
+        if outcome.get("race_count", 0) > 0 or (restore or {}).get("skipped"):
+            st.session_state[SESSION_DB_BOOTSTRAPPED] = True
+        diag.summary("run_login_bootstrap")
+        return outcome
 
 
 def ensure_db_schema_only() -> None:
@@ -270,22 +274,25 @@ def ensure_db_schema_only() -> None:
 
 def ensure_db_ready(*, force_restore: bool = False) -> None:
     """DB 復元が必要なときだけ bootstrap（詳細タブ読み込み時など）"""
-    if not force_restore and not st.session_state.get(PENDING_DB_RESTORE, True):
-        ensure_db_schema_only()
-        return
+    from load_diagnostics import span
 
-    count = _race_count_safe()
-    if count == 0:
-        st.session_state.pop(SESSION_DB_BOOTSTRAPPED, None)
-    if not st.session_state.get(SESSION_DB_BOOTSTRAPPED):
-        run_login_bootstrap()
-        st.session_state[PENDING_DB_RESTORE] = False
-    elif count == 0:
-        print("[auth] db empty after bootstrapped — retry restore", flush=True)
-        run_login_bootstrap()
-        st.session_state[PENDING_DB_RESTORE] = False
-    else:
-        st.session_state[PENDING_DB_RESTORE] = False
+    with span("auth.ensure_db_ready", force_restore=force_restore):
+        if not force_restore and not st.session_state.get(PENDING_DB_RESTORE, True):
+            ensure_db_schema_only()
+            return
+
+        count = _race_count_safe()
+        if count == 0:
+            st.session_state.pop(SESSION_DB_BOOTSTRAPPED, None)
+        if not st.session_state.get(SESSION_DB_BOOTSTRAPPED):
+            run_login_bootstrap()
+            st.session_state[PENDING_DB_RESTORE] = False
+        elif count == 0:
+            print("[auth] db empty after bootstrapped — retry restore", flush=True)
+            run_login_bootstrap()
+            st.session_state[PENDING_DB_RESTORE] = False
+        else:
+            st.session_state[PENDING_DB_RESTORE] = False
 
 
 def mark_pending_restore() -> None:
